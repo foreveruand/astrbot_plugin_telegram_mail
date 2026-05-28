@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.message_components import File, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.core.platform.message_session import MessageSession
@@ -49,11 +49,20 @@ def parse_mail_command_args(raw: str) -> list[str]:
     return parts
 
 
+def _message_chain_result(chain: MessageChain) -> MessageEventResult:
+    result = MessageEventResult(chain=list(chain.chain))
+    result.use_t2i_ = chain.use_t2i_
+    result.use_markdown_ = chain.use_markdown_
+    result.type = chain.type
+    result.reply_markup = chain.reply_markup
+    return result
+
+
 @register(
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.0",
+    "0.1.1",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -268,11 +277,17 @@ class TelegramMailPlugin(Star):
 
         if op == "more":
             page = int(args[0]) if args else 0
-            event.set_result(self._full_text_card(account, parsed, token, page))
+            event.set_result(
+                _message_chain_result(
+                    self._full_text_card(account, parsed, token, page)
+                )
+            )
             await event.answer_callback_query()
             return
         if op == "attachments":
-            event.set_result(self._attachments_card(parsed, token))
+            event.set_result(
+                _message_chain_result(self._attachments_card(parsed, token))
+            )
             await event.answer_callback_query()
             return
         if op == "att":
@@ -281,34 +296,46 @@ class TelegramMailPlugin(Star):
             await event.answer_callback_query("附件已发送")
             return
         if op == "action":
-            event.set_result(self._action_card(parsed, token))
+            event.set_result(_message_chain_result(self._action_card(parsed, token)))
             await event.answer_callback_query()
             return
         if op == "back":
-            event.set_result(self._mail_card(account, parsed, token))
+            event.set_result(
+                _message_chain_result(self._mail_card(account, parsed, token))
+            )
             await event.answer_callback_query()
             return
         if op == "block":
             self.store.block_sender(account.account_id, parsed.sender_email)
             self.store.save()
             event.set_result(
-                MessageChain([Plain(f"已屏蔽发件人: {parsed.sender_email}")])
+                _message_chain_result(
+                    MessageChain([Plain(f"已屏蔽发件人: {parsed.sender_email}")])
+                )
             )
             await event.answer_callback_query("已屏蔽")
             return
         if op in {"archive", "delete", "read", "unread"}:
             await self._run_mail_action(account, parsed, op)
-            event.set_result(MessageChain([Plain(self._action_done_text(parsed, op))]))
+            event.set_result(
+                _message_chain_result(
+                    MessageChain([Plain(self._action_done_text(parsed, op))])
+                )
+            )
             await event.answer_callback_query("操作完成")
             return
         if op == "unsubscribe":
-            event.set_result(self._unsubscribe_card(parsed, token))
+            event.set_result(
+                _message_chain_result(self._unsubscribe_card(parsed, token))
+            )
             await event.answer_callback_query()
             return
         if op == "reply":
             event.set_result(
-                MessageChain(
-                    [Plain(f"使用命令回复此邮件:\n/mail reply {token} <回复内容>")]
+                _message_chain_result(
+                    MessageChain(
+                        [Plain(f"使用命令回复此邮件:\n/mail reply {token} <回复内容>")]
+                    )
                 )
             )
             await event.answer_callback_query()
