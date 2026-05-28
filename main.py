@@ -4,6 +4,8 @@ import asyncio
 import json
 import re
 import shlex
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -23,7 +25,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 
-from .mail_client import MailClient
+from .mail_client import IdleNotSupported, MailClient
 from .models import MailAccount, ParsedMail
 from .parser import extract_attachment_payload, parse_message
 from .storage import JsonStore
@@ -33,6 +35,8 @@ CALLBACK_PREFIX = "tmail"
 DEFAULT_PREVIEW_LENGTH = 600
 DEFAULT_PAGE_SIZE = 2500
 DEFAULT_MAX_FETCH = 10
+DEFAULT_IDLE_TIMEOUT = 1740
+IDLE_WAIT_SLICE = 60
 MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
 
 
@@ -74,6 +78,8 @@ class TelegramMailPlugin(Star):
         self.store = JsonStore(data_dir, max_tokens=self._config_int("max_tokens", 500))
         self.tasks: list[asyncio.Task] = []
         self._stop_event = asyncio.Event()
+        self._thread_stop_event = threading.Event()
+        self.folder_modes: dict[tuple[str, str], str] = {}
 
     async def initialize(self) -> None:
         self.store.load()
@@ -81,12 +87,18 @@ class TelegramMailPlugin(Star):
         for account in accounts:
             if not account.enabled:
                 continue
-            task = asyncio.create_task(self._poll_loop(account))
-            self.tasks.append(task)
+            if account.realtime_enabled:
+                for folder in account.imap_folders:
+                    task = asyncio.create_task(self._watch_folder_loop(account, folder))
+                    self.tasks.append(task)
+            else:
+                task = asyncio.create_task(self._poll_loop(account))
+                self.tasks.append(task)
         logger.info("Telegram mail plugin initialized with %s accounts", len(accounts))
 
     async def terminate(self) -> None:
         self._stop_event.set()
+        self._thread_stop_event.set()
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -155,6 +167,7 @@ class TelegramMailPlugin(Star):
     async def _poll_loop(self, account: MailAccount) -> None:
         while not self._stop_event.is_set():
             try:
+                self._set_account_mode(account, "polling")
                 await self._poll_account(account, push=True)
                 self.store.clear_last_error(account.account_id)
             except asyncio.CancelledError:
@@ -164,13 +177,68 @@ class TelegramMailPlugin(Star):
                 self.store.set_last_error(account.account_id, str(exc))
                 self.store.save()
 
+            await self._sleep_poll_interval(account)
+
+    async def _watch_folder_loop(self, account: MailAccount, folder: str) -> None:
+        last_resync = 0.0
+        while not self._stop_event.is_set():
             try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=max(account.poll_interval, 30),
+                if time.monotonic() - last_resync >= max(account.poll_interval, 30):
+                    await self._poll_folder(account, folder, push=True)
+                    self.store.clear_last_error(account.account_id)
+                    last_resync = time.monotonic()
+
+                self._set_folder_mode(account, folder, "idle")
+                changed = await asyncio.to_thread(
+                    self.mail_client.wait_for_new_mail,
+                    account,
+                    folder,
+                    account.idle_timeout,
+                    IDLE_WAIT_SLICE,
+                    self._thread_stop_event,
                 )
-            except asyncio.TimeoutError:
-                pass
+                if changed:
+                    await self._poll_folder(account, folder, push=True)
+                    self.store.clear_last_error(account.account_id)
+                    last_resync = time.monotonic()
+            except asyncio.CancelledError:
+                raise
+            except IdleNotSupported:
+                self._set_folder_mode(account, folder, "polling fallback")
+                try:
+                    await self._poll_folder(account, folder, push=True)
+                    self.store.clear_last_error(account.account_id)
+                    last_resync = time.monotonic()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception(
+                        "Mail fallback poll failed for account %s folder %s",
+                        account.account_id,
+                        folder,
+                    )
+                    self.store.set_last_error(account.account_id, str(exc))
+                    self.store.save()
+                await self._sleep_poll_interval(account)
+            except Exception as exc:
+                logger.exception(
+                    "Mail IDLE failed for account %s folder %s",
+                    account.account_id,
+                    folder,
+                )
+                self._set_folder_mode(account, folder, "polling fallback")
+                self.store.set_last_error(account.account_id, str(exc))
+                self.store.save()
+                await self._sleep_poll_interval(account)
+
+    async def _sleep_poll_interval(self, account: MailAccount) -> None:
+        try:
+            await asyncio.wait_for(
+                self._stop_event.wait(),
+                timeout=max(account.poll_interval, 30),
+            )
+        except asyncio.TimeoutError:
+            pass
 
     async def _check_now(self, account_id: str = "") -> int:
         accounts = self._accounts()
@@ -189,43 +257,58 @@ class TelegramMailPlugin(Star):
     async def _poll_account(self, account: MailAccount, *, push: bool) -> int:
         total = 0
         for folder in account.imap_folders:
-            uids = await asyncio.to_thread(self.mail_client.list_uids, account, folder)
-            current = set(uids)
-            seen = self.store.get_seen(account.account_id, folder)
-            if not self.store.is_initialized(account.account_id, folder):
-                self.store.set_initialized(account.account_id, folder)
-                if not self._config_bool("notify_existing_on_first_run", False):
-                    self.store.set_seen(account.account_id, folder, current)
-                    continue
-
-            new_uids = [uid for uid in uids if uid not in seen]
-            max_fetch = self._config_int("max_fetch_per_poll", DEFAULT_MAX_FETCH)
-            for uid in new_uids[-max_fetch:]:
-                raw = await asyncio.to_thread(
-                    self.mail_client.fetch_message,
-                    account,
-                    folder,
-                    uid,
-                )
-                parsed = parse_message(
-                    raw,
-                    account_id=account.account_id,
-                    folder=folder,
-                    uid=uid,
-                )
-                self.store.add_seen(account.account_id, folder, uid)
-                if self.store.is_blocked(account.account_id, parsed.sender_email):
-                    continue
-                if push:
-                    await self._push_mail_card(account, parsed, raw)
-                total += 1
-
-            self.store.set_last_check(
-                account.account_id,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            )
-        self.store.save()
+            total += await self._poll_folder(account, folder, push=push)
         return total
+
+    async def _poll_folder(
+        self,
+        account: MailAccount,
+        folder: str,
+        *,
+        push: bool,
+    ) -> int:
+        total = 0
+        uids = await asyncio.to_thread(self.mail_client.list_uids, account, folder)
+        current = set(uids)
+        seen = self.store.get_seen(account.account_id, folder)
+        if not self.store.is_initialized(account.account_id, folder):
+            self.store.set_initialized(account.account_id, folder)
+            if not self._config_bool("notify_existing_on_first_run", False):
+                self.store.set_seen(account.account_id, folder, current)
+                self._mark_account_checked(account)
+                return 0
+
+        new_uids = [uid for uid in uids if uid not in seen]
+        max_fetch = self._config_int("max_fetch_per_poll", DEFAULT_MAX_FETCH)
+        for uid in new_uids[-max_fetch:]:
+            raw = await asyncio.to_thread(
+                self.mail_client.fetch_message,
+                account,
+                folder,
+                uid,
+            )
+            parsed = parse_message(
+                raw,
+                account_id=account.account_id,
+                folder=folder,
+                uid=uid,
+            )
+            self.store.add_seen(account.account_id, folder, uid)
+            if self.store.is_blocked(account.account_id, parsed.sender_email):
+                continue
+            if push:
+                await self._push_mail_card(account, parsed, raw)
+            total += 1
+
+        self._mark_account_checked(account)
+        return total
+
+    def _mark_account_checked(self, account: MailAccount) -> None:
+        self.store.set_last_check(
+            account.account_id,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        self.store.save()
 
     async def _push_mail_card(
         self,
@@ -616,11 +699,12 @@ class TelegramMailPlugin(Star):
         lines = ["Telegram Mail 状态"]
         for account in accounts:
             status = "enabled" if account.enabled else "disabled"
+            mode = self._account_mode(account)
             last_check = self.store.last_check(account.account_id) or "-"
             last_error = self.store.last_error(account.account_id)
             lines.append(
                 f"- {account.account_id} ({account.display_name}): {status}, "
-                f"last_check={last_check}, target={account.target_chat_id}"
+                f"mode={mode}, last_check={last_check}, target={account.target_chat_id}"
             )
             if last_error:
                 lines.append(f"  error={last_error}")
@@ -699,6 +783,15 @@ class TelegramMailPlugin(Star):
             poll_interval=int(
                 item.get("poll_interval") or self._config_int("poll_interval", 300)
             ),
+            realtime_enabled=self._item_bool(
+                item,
+                "realtime_enabled",
+                self._config_bool("realtime_enabled", True),
+            ),
+            idle_timeout=int(
+                item.get("idle_timeout")
+                or self._config_int("idle_timeout", DEFAULT_IDLE_TIMEOUT)
+            ),
         )
         self._validate_account(account)
         return account
@@ -734,6 +827,28 @@ class TelegramMailPlugin(Star):
         if value.lower() in {"group", "group_message"}:
             return MessageType.GROUP_MESSAGE
         return MessageType.FRIEND_MESSAGE
+
+    def _set_account_mode(self, account: MailAccount, mode: str) -> None:
+        for folder in account.imap_folders:
+            self._set_folder_mode(account, folder, mode)
+
+    def _set_folder_mode(self, account: MailAccount, folder: str, mode: str) -> None:
+        self.folder_modes[(account.account_id, folder)] = mode
+
+    def _account_mode(self, account: MailAccount) -> str:
+        if not account.enabled:
+            return "-"
+        if not account.realtime_enabled:
+            return "polling"
+        modes = {
+            self.folder_modes.get((account.account_id, folder), "starting")
+            for folder in account.imap_folders
+        }
+        if "polling fallback" in modes:
+            return "polling fallback"
+        if modes == {"idle"}:
+            return "idle"
+        return ", ".join(sorted(modes))
 
     @staticmethod
     def _truncate(value: str, limit: int) -> str:
@@ -774,6 +889,17 @@ class TelegramMailPlugin(Star):
 
     def _config_bool(self, key: str, default: bool) -> bool:
         value = self.config.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _item_bool(item: dict[str, Any], key: str, default: bool) -> bool:
+        if key not in item:
+            return default
+        value = item.get(key)
         if isinstance(value, bool):
             return value
         if isinstance(value, str):

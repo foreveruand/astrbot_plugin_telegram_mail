@@ -12,6 +12,18 @@
         "default": 300,
         "hint": "账号未设置 poll_interval 时使用该值。最低实际等待时间为 30 秒。"
     },
+    "realtime_enabled": {
+        "description": "启用 IMAP IDLE 实时监听",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后优先使用 IMAP IDLE 实时获取新邮件；服务端不支持或连接失败时自动回退为定时抓取。账号配置可覆盖该值。"
+    },
+    "idle_timeout": {
+        "description": "IMAP IDLE 重连间隔(秒)",
+        "type": "int",
+        "default": 1740,
+        "hint": "账号未设置 idle_timeout 时使用该值。插件内部会分片等待以便及时停止。"
+    },
     "notify_existing_on_first_run": {
         "description": "首次运行推送历史邮件",
         "type": "bool",
@@ -49,4 +61,3 @@
         "hint": "用于缓存 Telegram inline button 到邮件上下文的映射。"
     }
 }
-

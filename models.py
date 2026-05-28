@@ -27,6 +27,8 @@ class MailAccount:
     archive_folder: str
     trash_folder: str
     poll_interval: int
+    realtime_enabled: bool
+    idle_timeout: int
 
 
 @dataclass(slots=True)

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import email.utils
 import imaplib
+import select
 import smtplib
 import ssl
+import threading
+import time
 from collections.abc import Iterable
 from email.message import EmailMessage
 
 from .models import MailAccount
+
+
+class IdleNotSupported(RuntimeError):
+    pass
 
 
 class MailClient:
@@ -70,6 +77,27 @@ class MailClient:
             status, _ = client.uid("STORE", uid, op, r"(\Seen)")
             if status != "OK":
                 raise RuntimeError(f"Failed to update seen flag for UID {uid}")
+
+    def wait_for_new_mail(
+        self,
+        account: MailAccount,
+        folder: str,
+        timeout: int,
+        check_interval: int = 60,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        with self._imap(account) as client:
+            if not self._supports_idle(client):
+                raise IdleNotSupported(
+                    f"IMAP server does not support IDLE: {account.account_id}"
+                )
+            self._select_folder(client, folder)
+            return self._idle_wait(
+                client,
+                max(timeout, 1),
+                max(check_interval, 1),
+                stop_event,
+            )
 
     def send_mail(
         self,
@@ -149,6 +177,74 @@ class MailClient:
         password = account.smtp_password or account.imap_password
         if user:
             client.login(user, password)
+
+    @staticmethod
+    def _supports_idle(client: imaplib.IMAP4) -> bool:
+        status, data = client.capability()
+        if status != "OK" or not data:
+            return False
+        caps = b" ".join(part for part in data if isinstance(part, bytes)).upper()
+        return b"IDLE" in caps.split()
+
+    @staticmethod
+    def _idle_wait(
+        client: imaplib.IMAP4,
+        timeout: int,
+        check_interval: int = 60,
+        stop_event: threading.Event | None = None,
+    ) -> bool:
+        sock = getattr(client, "sock", None)
+        if sock is None:
+            raise RuntimeError("IMAP connection does not expose a socket")
+
+        tag = client._new_tag()
+        old_timeout = sock.gettimeout()
+        idle_started = False
+        try:
+            client.send(tag + b" IDLE\r\n")
+            line = client._get_line()
+            if not line.startswith(b"+"):
+                raise RuntimeError(f"Failed to enter IMAP IDLE: {line!r}")
+            idle_started = True
+
+            deadline = time.monotonic() + timeout
+            while True:
+                if stop_event and stop_event.is_set():
+                    return False
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                ready, _, _ = select.select(
+                    [sock], [], [], min(remaining, check_interval)
+                )
+                if not ready:
+                    continue
+                line = client._get_line()
+                upper = line.upper()
+                if b" EXISTS" in upper or b" RECENT" in upper:
+                    return True
+                if line.startswith(tag + b" "):
+                    return False
+        finally:
+            if idle_started:
+                try:
+                    sock.settimeout(10)
+                    client.send(b"DONE\r\n")
+                    MailClient._drain_idle_done(client, tag)
+                finally:
+                    sock.settimeout(old_timeout)
+            client.tagged_commands.pop(tag, None)
+
+    @staticmethod
+    def _drain_idle_done(client: imaplib.IMAP4, tag: bytes) -> None:
+        tag_prefix = tag + b" "
+        while True:
+            line = client._get_line()
+            if line.startswith(tag_prefix):
+                upper = line.upper()
+                if b" OK" not in upper:
+                    raise RuntimeError(f"Failed to end IMAP IDLE: {line!r}")
+                return
 
 
 class _ImapContext:
