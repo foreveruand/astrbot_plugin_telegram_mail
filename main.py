@@ -6,6 +6,9 @@ import re
 import shlex
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +40,14 @@ DEFAULT_PAGE_SIZE = 2500
 DEFAULT_MAX_FETCH = 10
 DEFAULT_IDLE_TIMEOUT = 1740
 IDLE_WAIT_SLICE = 60
+MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+MICROSOFT_DEVICE_CODE_URL = (
+    "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+)
+MICROSOFT_OUTLOOK_SCOPE = (
+    "https://outlook.office.com/IMAP.AccessAsUser.All "
+    "https://outlook.office.com/SMTP.Send offline_access"
+)
 MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
 
 
@@ -73,7 +84,10 @@ class TelegramMailPlugin(Star):
         super().__init__(context, config)
         self.context = context
         self.config = config or {}
-        self.mail_client = MailClient()
+        self.mail_client = MailClient(
+            self._save_oauth2_token_response,
+            self._load_oauth2_token_state,
+        )
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         self.store = JsonStore(data_dir, max_tokens=self._config_int("max_tokens", 500))
         self.tasks: list[asyncio.Task] = []
@@ -124,6 +138,8 @@ class TelegramMailPlugin(Star):
                 yield event.plain_result(await self._cmd_send(args[1:]))
             elif command == "reply":
                 yield event.plain_result(await self._cmd_reply(args[1:]))
+            elif command == "oauth":
+                yield event.plain_result(await self._cmd_oauth(args[1:]))
             elif command == "blocklist":
                 account_id = args[1] if len(args) > 1 else ""
                 yield event.plain_result(self._render_blocklist(account_id))
@@ -535,6 +551,158 @@ class TelegramMailPlugin(Star):
         )
         return f"已回复 {parsed.sender_email}"
 
+    async def _cmd_oauth(self, args: list[str]) -> str:
+        if len(args) != 1:
+            return "用法: /mail oauth <account_id>"
+        account = self._account(args[0])
+        if "oauth2" not in {account.imap_auth_type, account.smtp_auth_type}:
+            return f"账号 {account.account_id} 未启用 OAuth2。"
+        if not account.oauth2_client_id:
+            return f"账号 {account.account_id} 缺少 oauth2_client_id。"
+
+        device = await asyncio.to_thread(self._request_device_code, account)
+        task = asyncio.create_task(self._complete_oauth_device_flow(account, device))
+        self.tasks.append(task)
+
+        verification_uri = device.get("verification_uri_complete") or device.get(
+            "verification_uri"
+        )
+        user_code = device.get("user_code", "")
+        expires_in = int(device.get("expires_in") or 0)
+        lines = [
+            f"请打开以下链接完成 {account.display_name} OAuth2 授权:",
+            str(verification_uri),
+        ]
+        if user_code:
+            lines.append(f"授权代码: {user_code}")
+        if expires_in:
+            lines.append(f"有效期: {expires_in // 60} 分钟")
+        lines.append("授权完成后插件会自动保存 token，并向目标会话发送结果。")
+        return "\n".join(lines)
+
+    def _request_device_code(self, account: MailAccount) -> dict[str, Any]:
+        payload = self._post_oauth2_form(
+            account.oauth2_device_code_url,
+            {
+                "client_id": account.oauth2_client_id,
+                "scope": account.oauth2_scope,
+            },
+        )
+        if "device_code" not in payload:
+            raise RuntimeError("OAuth2 device code response has no device_code")
+        return payload
+
+    async def _complete_oauth_device_flow(
+        self,
+        account: MailAccount,
+        device: dict[str, Any],
+    ) -> None:
+        interval = max(int(device.get("interval") or 5), 1)
+        expires_at = time.time() + int(device.get("expires_in") or 900)
+        while time.time() < expires_at and not self._stop_event.is_set():
+            await asyncio.sleep(interval)
+            try:
+                payload = await asyncio.to_thread(
+                    self._poll_device_token,
+                    account,
+                    str(device["device_code"]),
+                )
+            except OAuth2AuthorizationPending:
+                continue
+            except OAuth2SlowDown:
+                interval += 5
+                continue
+            except Exception as exc:
+                logger.exception("OAuth2 device flow failed for %s", account.account_id)
+                await self._send_account_notice(account, f"OAuth2 授权失败: {exc}")
+                return
+
+            self._save_oauth2_token_response(account, payload)
+            await self._send_account_notice(
+                account,
+                f"OAuth2 授权完成: {account.display_name}",
+            )
+            return
+
+        await self._send_account_notice(account, f"OAuth2 授权超时: {account.display_name}")
+
+    def _poll_device_token(self, account: MailAccount, device_code: str) -> dict[str, Any]:
+        return self._post_oauth2_form(
+            account.oauth2_token_url,
+            {
+                "client_id": account.oauth2_client_id,
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+                "device_code": device_code,
+            },
+            client_secret=account.oauth2_client_secret,
+        )
+
+    @staticmethod
+    def _post_oauth2_form(
+        url: str,
+        form: dict[str, str],
+        *,
+        client_secret: str = "",
+    ) -> dict[str, Any]:
+        values = {key: value for key, value in form.items() if value}
+        if client_secret:
+            values["client_secret"] = client_secret
+        data = urllib.parse.urlencode(values).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                raise RuntimeError(f"OAuth2 request failed: HTTP {exc.code}") from exc
+            error = str(payload.get("error") or "")
+            if error == "authorization_pending":
+                raise OAuth2AuthorizationPending from exc
+            if error == "slow_down":
+                raise OAuth2SlowDown from exc
+            description = str(payload.get("error_description") or error)
+            raise RuntimeError(description) from exc
+
+    def _save_oauth2_token_response(
+        self,
+        account: MailAccount,
+        payload: dict[str, Any],
+    ) -> None:
+        access_token = str(payload.get("access_token") or "")
+        refresh_token = str(payload.get("refresh_token") or account.oauth2_refresh_token)
+        expires_at = float(
+            payload.get("expires_at") or time.time() + int(payload.get("expires_in") or 3600)
+        )
+        self.store.set_oauth2_state(
+            account.account_id,
+            {
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": expires_at,
+                "updated_at": time.time(),
+            },
+        )
+        self.store.save()
+
+    def _load_oauth2_token_state(self, account: MailAccount) -> dict[str, Any]:
+        return self.store.get_oauth2_state(account.account_id)
+
+    async def _send_account_notice(self, account: MailAccount, text: str) -> None:
+        session = MessageSession(
+            platform_name=account.platform_id,
+            message_type=self._message_type(account.message_type),
+            session_id=account.target_chat_id,
+        )
+        await self.context.send_message(session, MessageChain([Plain(text)]))
+
     def _cmd_unblock(self, args: list[str]) -> str:
         if len(args) != 2:
             return "用法: /mail unblock <account_id> <sender-or-domain>"
@@ -702,9 +870,11 @@ class TelegramMailPlugin(Star):
             mode = self._account_mode(account)
             last_check = self.store.last_check(account.account_id) or "-"
             last_error = self.store.last_error(account.account_id)
+            oauth2_state = self.store.get_oauth2_state(account.account_id)
+            oauth2_status = "authorized" if oauth2_state.get("access_token") else "unauthorized"
             lines.append(
                 f"- {account.account_id} ({account.display_name}): {status}, "
-                f"mode={mode}, last_check={last_check}, target={account.target_chat_id}"
+                f"mode={mode}, oauth2={oauth2_status}, last_check={last_check}, target={account.target_chat_id}"
             )
             if last_error:
                 lines.append(f"  error={last_error}")
@@ -756,9 +926,20 @@ class TelegramMailPlugin(Star):
             raise ValueError("账号缺少 account_id")
         imap_user = str(item.get("imap_user") or item.get("username") or "").strip()
         smtp_user = str(item.get("smtp_user") or imap_user).strip()
+        provider = str(item.get("provider") or "").strip().lower()
+        is_outlook = provider in {"outlook", "outlook.com", "hotmail", "microsoft"}
+        default_auth_type = "oauth2" if is_outlook else "password"
+        auth_type = str(item.get("auth_type") or default_auth_type)
+        auth_type = auth_type.lower().replace("xoauth2", "oauth2")
+        imap_auth_type = str(item.get("imap_auth_type") or auth_type).lower()
+        smtp_auth_type = str(item.get("smtp_auth_type") or auth_type).lower()
         imap_folders = item.get("imap_folders") or ["INBOX"]
         if isinstance(imap_folders, str):
             imap_folders = [imap_folders]
+        oauth2_state = {}
+        store = getattr(self, "store", None)
+        if store is not None:
+            oauth2_state = store.get_oauth2_state(account_id)
         account = MailAccount(
             account_id=account_id,
             display_name=str(item.get("display_name") or account_id),
@@ -766,18 +947,49 @@ class TelegramMailPlugin(Star):
             target_chat_id=str(item.get("target_chat_id") or "").strip(),
             platform_id=str(item.get("platform_id") or "telegram"),
             message_type=str(item.get("message_type") or "friend"),
-            imap_host=str(item.get("imap_host") or "").strip(),
+            imap_host=str(
+                item.get("imap_host") or ("outlook.office365.com" if is_outlook else "")
+            ).strip(),
             imap_port=int(item.get("imap_port") or 993),
             imap_user=imap_user,
             imap_password=str(item.get("imap_password") or item.get("password") or ""),
+            imap_auth_type=imap_auth_type,
             imap_tls=bool(item.get("imap_tls", True)),
             imap_folders=[str(folder) for folder in imap_folders],
-            smtp_host=str(item.get("smtp_host") or "").strip(),
-            smtp_port=int(item.get("smtp_port") or 465),
+            smtp_host=str(
+                item.get("smtp_host") or ("smtp-mail.outlook.com" if is_outlook else "")
+            ).strip(),
+            smtp_port=int(item.get("smtp_port") or (587 if is_outlook else 465)),
             smtp_user=smtp_user,
             smtp_password=str(item.get("smtp_password") or item.get("password") or ""),
-            smtp_tls=str(item.get("smtp_tls") or "ssl").lower(),
+            smtp_auth_type=smtp_auth_type,
+            smtp_tls=str(item.get("smtp_tls") or ("starttls" if is_outlook else "ssl")).lower(),
             from_address=str(item.get("from_address") or smtp_user or imap_user),
+            oauth2_access_token=str(
+                item.get("oauth2_access_token") or oauth2_state.get("access_token") or ""
+            ),
+            oauth2_refresh_token=str(
+                item.get("oauth2_refresh_token")
+                or oauth2_state.get("refresh_token")
+                or ""
+            ),
+            oauth2_client_id=str(item.get("oauth2_client_id") or ""),
+            oauth2_client_secret=str(item.get("oauth2_client_secret") or ""),
+            oauth2_token_url=str(
+                item.get("oauth2_token_url")
+                or MICROSOFT_TOKEN_URL
+            ),
+            oauth2_device_code_url=str(
+                item.get("oauth2_device_code_url")
+                or MICROSOFT_DEVICE_CODE_URL
+            ),
+            oauth2_scope=str(
+                item.get("oauth2_scope")
+                or MICROSOFT_OUTLOOK_SCOPE
+            ),
+            oauth2_expires_at=float(
+                item.get("oauth2_expires_at") or oauth2_state.get("expires_at") or 0
+            ),
             archive_folder=str(item.get("archive_folder") or "Archive"),
             trash_folder=str(item.get("trash_folder") or "Trash"),
             poll_interval=int(
@@ -804,8 +1016,22 @@ class TelegramMailPlugin(Star):
             "target_chat_id": account.target_chat_id,
             "imap_host": account.imap_host,
             "imap_user": account.imap_user,
-            "imap_password": account.imap_password,
         }
+        if account.imap_auth_type not in {"password", "oauth2"}:
+            required["imap_auth_type"] = ""
+        if account.smtp_auth_type not in {"password", "oauth2"}:
+            required["smtp_auth_type"] = ""
+        if account.imap_auth_type == "password":
+            required["imap_password"] = account.imap_password
+        if account.smtp_host and account.smtp_auth_type == "password":
+            required["smtp_password"] = account.smtp_password or account.imap_password
+        if "oauth2" in {account.imap_auth_type, account.smtp_auth_type}:
+            token = account.oauth2_access_token or account.oauth2_refresh_token
+            client_id = account.oauth2_client_id
+            required["oauth2 token 或 oauth2_client_id"] = token or client_id
+            if account.oauth2_refresh_token:
+                required["oauth2_client_id"] = account.oauth2_client_id
+                required["oauth2_token_url"] = account.oauth2_token_url
         missing = [key for key, value in required.items() if not value]
         if missing:
             raise ValueError(
@@ -914,6 +1140,15 @@ class TelegramMailPlugin(Star):
             "/mail check [account_id]\n"
             "/mail send <account_id> <to> | <subject> | <body>\n"
             "/mail reply <token> <body>\n"
+            "/mail oauth <account_id>\n"
             "/mail blocklist [account_id]\n"
             "/mail unblock <account_id> <sender-or-domain>"
         )
+
+
+class OAuth2AuthorizationPending(RuntimeError):
+    pass
+
+
+class OAuth2SlowDown(RuntimeError):
+    pass

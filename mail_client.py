@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import email.utils
 import imaplib
+import json
 import select
 import smtplib
 import ssl
 import threading
 import time
-from collections.abc import Iterable
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Iterable
 from email.message import EmailMessage
 
 from .models import MailAccount
@@ -18,6 +21,15 @@ class IdleNotSupported(RuntimeError):
 
 
 class MailClient:
+    def __init__(
+        self,
+        oauth2_token_updater: Callable[[MailAccount, dict], None] | None = None,
+        oauth2_token_loader: Callable[[MailAccount], dict] | None = None,
+    ) -> None:
+        self._oauth2_cache: dict[str, tuple[str, float]] = {}
+        self._oauth2_token_updater = oauth2_token_updater
+        self._oauth2_token_loader = oauth2_token_loader
+
     def list_uids(self, account: MailAccount, folder: str) -> list[str]:
         with self._imap(account) as client:
             self._select_folder(client, folder)
@@ -146,7 +158,16 @@ class MailClient:
             client = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
         else:
             client = imaplib.IMAP4(account.imap_host, account.imap_port)
-        client.login(account.imap_user, account.imap_password)
+        if account.imap_auth_type == "oauth2":
+            client.authenticate(
+                "XOAUTH2",
+                lambda _: self._xoauth2_string(
+                    account.imap_user,
+                    self._oauth2_access_token(account),
+                ),
+            )
+        else:
+            client.login(account.imap_user, account.imap_password)
         return _ImapContext(client)
 
     @staticmethod
@@ -171,12 +192,84 @@ class MailClient:
             raise RuntimeError(f"Failed to mark UID {uid} as deleted")
         client.expunge()
 
-    @staticmethod
-    def _smtp_login(client: smtplib.SMTP, account: MailAccount) -> None:
+    def _smtp_login(self, client: smtplib.SMTP, account: MailAccount) -> None:
         user = account.smtp_user or account.imap_user
+        if not user:
+            return
+        if account.smtp_auth_type == "oauth2":
+            client.auth(
+                "XOAUTH2",
+                lambda _: self._xoauth2_string(
+                    user,
+                    self._oauth2_access_token(account),
+                ),
+            )
+            return
         password = account.smtp_password or account.imap_password
-        if user:
-            client.login(user, password)
+        client.login(user, password)
+
+    @staticmethod
+    def _xoauth2_string(user: str, access_token: str) -> str:
+        return f"user={user}\x01auth=Bearer {access_token}\x01\x01"
+
+    def _oauth2_access_token(self, account: MailAccount) -> str:
+        cache_key = account.account_id
+        now = time.time()
+        cached = self._oauth2_cache.get(cache_key)
+        if cached and cached[1] > time.time() + 60:
+            return cached[0]
+
+        stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
+        access_token = str(account.oauth2_access_token or stored.get("access_token") or "")
+        refresh_token = str(
+            account.oauth2_refresh_token or stored.get("refresh_token") or ""
+        )
+        expires_at = float(account.oauth2_expires_at or stored.get("expires_at") or 0)
+
+        if access_token and expires_at > now + 60:
+            self._oauth2_cache[cache_key] = (access_token, expires_at)
+            return access_token
+        if access_token and not refresh_token:
+            return access_token
+        if not refresh_token:
+            raise RuntimeError(
+                f"OAuth2 account {account.account_id} is not authorized; run /mail oauth {account.account_id}"
+            )
+        if not account.oauth2_client_id:
+            raise RuntimeError(
+                f"OAuth2 account {account.account_id} is missing oauth2_client_id"
+            )
+
+        form = {
+            "client_id": account.oauth2_client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        if account.oauth2_client_secret:
+            form["client_secret"] = account.oauth2_client_secret
+        if account.oauth2_scope:
+            form["scope"] = account.oauth2_scope
+
+        data = urllib.parse.urlencode(form).encode("utf-8")
+        request = urllib.request.Request(
+            account.oauth2_token_url,
+            data=data,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        access_token = str(payload.get("access_token") or "")
+        if not access_token:
+            raise RuntimeError(
+                f"OAuth2 token response for {account.account_id} has no access_token"
+            )
+        expires_in = int(payload.get("expires_in") or 3600)
+        expires_at = time.time() + expires_in
+        self._oauth2_cache[cache_key] = (access_token, expires_at)
+        if self._oauth2_token_updater:
+            self._oauth2_token_updater(account, {**payload, "expires_at": expires_at})
+        return access_token
 
     @staticmethod
     def _supports_idle(client: imaplib.IMAP4) -> bool:

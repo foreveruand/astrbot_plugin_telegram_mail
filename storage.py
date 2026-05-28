@@ -17,6 +17,7 @@ class JsonStore:
             "seen": {},
             "initialized": {},
             "tokens": {},
+            "oauth2": {},
             "blocked": {},
             "last_errors": {},
             "last_checks": {},
@@ -136,6 +137,16 @@ class JsonStore:
         ordered = sorted(tokens.items(), key=lambda item: item[1].get("created_at", 0))
         for token, _ in ordered[: len(tokens) - self.max_tokens]:
             tokens.pop(token, None)
+
+    def get_oauth2_state(self, account_id: str) -> dict[str, Any]:
+        payload = self.data.setdefault("oauth2", {}).get(account_id, {})
+        return payload if isinstance(payload, dict) else {}
+
+    def set_oauth2_state(self, account_id: str, payload: dict[str, Any]) -> None:
+        self.data.setdefault("oauth2", {})[account_id] = payload
+
+    def clear_oauth2_state(self, account_id: str) -> None:
+        self.data.setdefault("oauth2", {}).pop(account_id, None)
 
 
 def _uid_sort_key(value: str) -> tuple[int, str]:

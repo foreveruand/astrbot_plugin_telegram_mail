@@ -50,3 +50,75 @@ def test_realtime_uses_global_default_when_account_omits_value():
 
     assert account.realtime_enabled is False
     assert account.idle_timeout == 900
+
+
+def test_outlook_provider_uses_oauth2_defaults():
+    account = _plugin()._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+            oauth2_access_token="token",
+        )
+    )
+
+    assert account.imap_host == "outlook.office365.com"
+    assert account.smtp_host == "smtp-mail.outlook.com"
+    assert account.smtp_port == 587
+    assert account.smtp_tls == "starttls"
+    assert account.imap_auth_type == "oauth2"
+    assert account.smtp_auth_type == "oauth2"
+
+
+def test_oauth2_account_accepts_refresh_token_without_password():
+    account = _plugin()._parse_account(
+        _account_config(
+            auth_type="oauth2",
+            imap_password="",
+            oauth2_refresh_token="refresh",
+            oauth2_client_id="client-id",
+        )
+    )
+
+    assert account.imap_auth_type == "oauth2"
+    assert account.oauth2_refresh_token == "refresh"
+
+
+def test_oauth2_account_accepts_client_id_before_authorization():
+    account = _plugin()._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+            oauth2_client_id="client-id",
+        )
+    )
+
+    assert account.oauth2_access_token == ""
+    assert account.oauth2_refresh_token == ""
+    assert account.oauth2_client_id == "client-id"
+
+
+def test_oauth2_account_reads_saved_token_state():
+    class Store:
+        def get_oauth2_state(self, account_id):
+            assert account_id == "a1"
+            return {
+                "access_token": "stored-access",
+                "refresh_token": "stored-refresh",
+                "expires_at": 123.0,
+            }
+
+    plugin = _plugin()
+    plugin.store = Store()
+    account = plugin._parse_account(
+        _account_config(
+            auth_type="oauth2",
+            imap_password="",
+            oauth2_client_id="client-id",
+        )
+    )
+
+    assert account.oauth2_access_token == "stored-access"
+    assert account.oauth2_refresh_token == "stored-refresh"
+    assert account.oauth2_expires_at == 123.0

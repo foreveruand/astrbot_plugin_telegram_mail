@@ -16,14 +16,24 @@ class MailAccount:
     imap_port: int
     imap_user: str
     imap_password: str
+    imap_auth_type: str
     imap_tls: bool
     imap_folders: list[str]
     smtp_host: str
     smtp_port: int
     smtp_user: str
     smtp_password: str
+    smtp_auth_type: str
     smtp_tls: str
     from_address: str
+    oauth2_access_token: str
+    oauth2_refresh_token: str
+    oauth2_client_id: str
+    oauth2_client_secret: str
+    oauth2_token_url: str
+    oauth2_device_code_url: str
+    oauth2_scope: str
+    oauth2_expires_at: float
     archive_folder: str
     trash_folder: str
     poll_interval: int

@@ -4,7 +4,7 @@
         "type": "text",
         "default": "[]",
         "obvious_hint": true,
-        "hint": "配置多个邮箱账号。每个账号包含 account_id、target_chat_id、imap_host、imap_user、imap_password、smtp_host、smtp_user、smtp_password 等字段。"
+        "hint": "配置多个邮箱账号。密码登录包含 account_id、target_chat_id、imap_host、imap_user、imap_password、smtp_host、smtp_user、smtp_password 等字段；Outlook 可设置 provider=outlook 和 oauth2_client_id，然后用 /mail oauth 完成浏览器授权。"
     },
     "poll_interval": {
         "description": "默认轮询间隔(秒)",
