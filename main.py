@@ -33,6 +33,20 @@ CALLBACK_PREFIX = "tmail"
 DEFAULT_PREVIEW_LENGTH = 600
 DEFAULT_PAGE_SIZE = 2500
 DEFAULT_MAX_FETCH = 10
+MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
+
+
+def parse_mail_command_args(raw: str) -> list[str]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    if parts and MAIL_COMMAND_RE.match(parts[0]):
+        return parts[1:]
+    return parts
 
 
 @register(
@@ -679,13 +693,7 @@ class TelegramMailPlugin(Star):
             )
 
     def _parse_command_args(self, raw: str) -> list[str]:
-        text = re.sub(r"^/mail(?:@\S+)?", "", raw, count=1).strip()
-        if not text:
-            return []
-        try:
-            return shlex.split(text)
-        except ValueError:
-            return text.split()
+        return parse_mail_command_args(raw)
 
     def _callback_chat_id(self, event: TelegramCallbackQueryEvent) -> str:
         if not event.message:
