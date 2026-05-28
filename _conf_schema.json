@@ -1,0 +1,52 @@
+{
+    "accounts_json": {
+        "description": "邮箱账号配置(JSON数组)",
+        "type": "text",
+        "default": "[]",
+        "obvious_hint": true,
+        "hint": "配置多个邮箱账号。每个账号包含 account_id、target_chat_id、imap_host、imap_user、imap_password、smtp_host、smtp_user、smtp_password 等字段。"
+    },
+    "poll_interval": {
+        "description": "默认轮询间隔(秒)",
+        "type": "int",
+        "default": 300,
+        "hint": "账号未设置 poll_interval 时使用该值。最低实际等待时间为 30 秒。"
+    },
+    "notify_existing_on_first_run": {
+        "description": "首次运行推送历史邮件",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时，首次启动只记录现有邮件 UID，不推送历史邮件。"
+    },
+    "max_fetch_per_poll": {
+        "description": "每次每文件夹最多推送邮件数",
+        "type": "int",
+        "default": 10,
+        "hint": "避免首次或长时间离线后刷屏。"
+    },
+    "preview_length": {
+        "description": "邮件卡片预览长度",
+        "type": "int",
+        "default": 600,
+        "hint": "超过该长度后通过 More 按钮查看全文分页。"
+    },
+    "page_size": {
+        "description": "全文分页字符数",
+        "type": "int",
+        "default": 2500,
+        "hint": "Telegram 消息限制内的全文分页大小。"
+    },
+    "max_attachment_mb": {
+        "description": "单个附件发送上限(MB)",
+        "type": "int",
+        "default": 20,
+        "hint": "超过限制的附件不会发送。"
+    },
+    "max_tokens": {
+        "description": "按钮上下文缓存数量",
+        "type": "int",
+        "default": 500,
+        "hint": "用于缓存 Telegram inline button 到邮件上下文的映射。"
+    }
+}
+

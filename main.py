@@ -1,0 +1,758 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import shlex
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import File, Plain
+from astrbot.api.star import Context, Star, register
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.sources.telegram.tg_event import (
+    TelegramCallbackQueryEvent,
+    TelegramPlatformEvent,
+)
+from astrbot.core.utils.astrbot_path import (
+    get_astrbot_plugin_data_path,
+    get_astrbot_temp_path,
+)
+
+from .mail_client import MailClient
+from .models import MailAccount, ParsedMail
+from .parser import extract_attachment_payload, parse_message
+from .storage import JsonStore
+
+PLUGIN_NAME = "astrbot_plugin_telegram_mail"
+CALLBACK_PREFIX = "tmail"
+DEFAULT_PREVIEW_LENGTH = 600
+DEFAULT_PAGE_SIZE = 2500
+DEFAULT_MAX_FETCH = 10
+
+
+@register(
+    PLUGIN_NAME,
+    "foreveruand",
+    "Telegram-only IMAP/SMTP mail assistant with inline actions.",
+    "0.1.0",
+)
+class TelegramMailPlugin(Star):
+    def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
+        super().__init__(context, config)
+        self.context = context
+        self.config = config or {}
+        self.mail_client = MailClient()
+        data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
+        self.store = JsonStore(data_dir, max_tokens=self._config_int("max_tokens", 500))
+        self.tasks: list[asyncio.Task] = []
+        self._stop_event = asyncio.Event()
+
+    async def initialize(self) -> None:
+        self.store.load()
+        accounts = self._accounts()
+        for account in accounts:
+            if not account.enabled:
+                continue
+            task = asyncio.create_task(self._poll_loop(account))
+            self.tasks.append(task)
+        logger.info("Telegram mail plugin initialized with %s accounts", len(accounts))
+
+    async def terminate(self) -> None:
+        self._stop_event.set()
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        self.store.save()
+
+    @filter.command("mail")
+    async def mail_command(self, event: AstrMessageEvent):
+        raw = (event.message_str or "").strip()
+        args = self._parse_command_args(raw)
+        if not args:
+            yield event.plain_result(self._help_text())
+            return
+
+        command = args[0].lower()
+        try:
+            if command == "status":
+                yield event.plain_result(self._render_status())
+            elif command == "check":
+                account_id = args[1] if len(args) > 1 else ""
+                count = await self._check_now(account_id)
+                yield event.plain_result(f"检查完成，新增推送 {count} 封邮件。")
+            elif command == "send":
+                yield event.plain_result(await self._cmd_send(args[1:]))
+            elif command == "reply":
+                yield event.plain_result(await self._cmd_reply(args[1:]))
+            elif command == "blocklist":
+                account_id = args[1] if len(args) > 1 else ""
+                yield event.plain_result(self._render_blocklist(account_id))
+            elif command == "unblock":
+                yield event.plain_result(self._cmd_unblock(args[1:]))
+            else:
+                yield event.plain_result(self._help_text())
+        except Exception as exc:
+            logger.exception("Telegram mail command failed")
+            yield event.plain_result(f"执行失败: {exc}")
+
+    @filter.callback_query()
+    async def handle_callback(self, event: TelegramCallbackQueryEvent) -> None:
+        data = (event.data or "").strip()
+        if not data.startswith(f"{CALLBACK_PREFIX}:"):
+            event.continue_event()
+            return
+
+        parts = data.split(":")
+        if len(parts) < 3:
+            await event.answer_callback_query("按钮数据无效")
+            event.stop_event()
+            return
+
+        token = parts[1]
+        op = parts[2]
+        payload = self.store.get_token(token)
+        if not payload:
+            await event.answer_callback_query("邮件上下文已过期，请重新检查")
+            event.stop_event()
+            return
+
+        try:
+            await self._handle_mail_callback(event, token, op, parts[3:], payload)
+        except Exception as exc:
+            logger.exception("Telegram mail callback failed")
+            await event.answer_callback_query(f"操作失败: {exc}", show_alert=True)
+        finally:
+            event.stop_event()
+
+    async def _poll_loop(self, account: MailAccount) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await self._poll_account(account, push=True)
+                self.store.clear_last_error(account.account_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("Mail poll failed for account %s", account.account_id)
+                self.store.set_last_error(account.account_id, str(exc))
+                self.store.save()
+
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=max(account.poll_interval, 30),
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _check_now(self, account_id: str = "") -> int:
+        accounts = self._accounts()
+        if account_id:
+            accounts = [
+                account for account in accounts if account.account_id == account_id
+            ]
+            if not accounts:
+                raise ValueError(f"未知账号: {account_id}")
+        total = 0
+        for account in accounts:
+            if account.enabled:
+                total += await self._poll_account(account, push=True)
+        return total
+
+    async def _poll_account(self, account: MailAccount, *, push: bool) -> int:
+        total = 0
+        for folder in account.imap_folders:
+            uids = await asyncio.to_thread(self.mail_client.list_uids, account, folder)
+            current = set(uids)
+            seen = self.store.get_seen(account.account_id, folder)
+            if not self.store.is_initialized(account.account_id, folder):
+                self.store.set_initialized(account.account_id, folder)
+                if not self._config_bool("notify_existing_on_first_run", False):
+                    self.store.set_seen(account.account_id, folder, current)
+                    continue
+
+            new_uids = [uid for uid in uids if uid not in seen]
+            max_fetch = self._config_int("max_fetch_per_poll", DEFAULT_MAX_FETCH)
+            for uid in new_uids[-max_fetch:]:
+                raw = await asyncio.to_thread(
+                    self.mail_client.fetch_message,
+                    account,
+                    folder,
+                    uid,
+                )
+                parsed = parse_message(
+                    raw,
+                    account_id=account.account_id,
+                    folder=folder,
+                    uid=uid,
+                )
+                self.store.add_seen(account.account_id, folder, uid)
+                if self.store.is_blocked(account.account_id, parsed.sender_email):
+                    continue
+                if push:
+                    await self._push_mail_card(account, parsed, raw)
+                total += 1
+
+            self.store.set_last_check(
+                account.account_id,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+        self.store.save()
+        return total
+
+    async def _push_mail_card(
+        self,
+        account: MailAccount,
+        parsed: ParsedMail,
+        raw: bytes,
+    ) -> None:
+        raw_path = self.store.save_raw_message(raw)
+        token = self.store.put_token(
+            {
+                "account_id": account.account_id,
+                "folder": parsed.folder,
+                "uid": parsed.uid,
+                "raw_path": raw_path,
+                "sender_email": parsed.sender_email,
+                "sender": parsed.sender,
+                "subject": parsed.subject,
+                "message_id": parsed.message_id,
+                "recipients": parsed.recipients,
+            }
+        )
+        self.store.save()
+        chain = self._mail_card(account, parsed, token)
+        session = MessageSession(
+            platform_name=account.platform_id,
+            message_type=self._message_type(account.message_type),
+            session_id=account.target_chat_id,
+        )
+        sent = await self.context.send_message(session, chain)
+        if not sent:
+            logger.warning("Failed to push mail card to session %s", session)
+
+    async def _handle_mail_callback(
+        self,
+        event: TelegramCallbackQueryEvent,
+        token: str,
+        op: str,
+        args: list[str],
+        payload: dict[str, Any],
+    ) -> None:
+        account = self._account(payload["account_id"])
+        raw = Path(payload["raw_path"]).read_bytes()
+        parsed = parse_message(
+            raw,
+            account_id=account.account_id,
+            folder=payload["folder"],
+            uid=payload["uid"],
+        )
+
+        if op == "more":
+            page = int(args[0]) if args else 0
+            event.set_result(self._full_text_card(account, parsed, token, page))
+            await event.answer_callback_query()
+            return
+        if op == "attachments":
+            event.set_result(self._attachments_card(parsed, token))
+            await event.answer_callback_query()
+            return
+        if op == "att":
+            index = int(args[0]) if args else 0
+            await self._send_attachment(event, raw, index)
+            await event.answer_callback_query("附件已发送")
+            return
+        if op == "action":
+            event.set_result(self._action_card(parsed, token))
+            await event.answer_callback_query()
+            return
+        if op == "back":
+            event.set_result(self._mail_card(account, parsed, token))
+            await event.answer_callback_query()
+            return
+        if op == "block":
+            self.store.block_sender(account.account_id, parsed.sender_email)
+            self.store.save()
+            event.set_result(
+                MessageChain([Plain(f"已屏蔽发件人: {parsed.sender_email}")])
+            )
+            await event.answer_callback_query("已屏蔽")
+            return
+        if op in {"archive", "delete", "read", "unread"}:
+            await self._run_mail_action(account, parsed, op)
+            event.set_result(MessageChain([Plain(self._action_done_text(parsed, op))]))
+            await event.answer_callback_query("操作完成")
+            return
+        if op == "unsubscribe":
+            event.set_result(self._unsubscribe_card(parsed, token))
+            await event.answer_callback_query()
+            return
+        if op == "reply":
+            event.set_result(
+                MessageChain(
+                    [Plain(f"使用命令回复此邮件:\n/mail reply {token} <回复内容>")]
+                )
+            )
+            await event.answer_callback_query()
+            return
+
+        await event.answer_callback_query("未知操作")
+
+    async def _run_mail_action(
+        self,
+        account: MailAccount,
+        parsed: ParsedMail,
+        op: str,
+    ) -> None:
+        if op == "archive":
+            await asyncio.to_thread(
+                self.mail_client.move_message,
+                account,
+                parsed.folder,
+                parsed.uid,
+                account.archive_folder,
+            )
+        elif op == "delete":
+            await asyncio.to_thread(
+                self.mail_client.delete_message,
+                account,
+                parsed.folder,
+                parsed.uid,
+            )
+        elif op == "read":
+            await asyncio.to_thread(
+                self.mail_client.mark_seen,
+                account,
+                parsed.folder,
+                parsed.uid,
+                True,
+            )
+        elif op == "unread":
+            await asyncio.to_thread(
+                self.mail_client.mark_seen,
+                account,
+                parsed.folder,
+                parsed.uid,
+                False,
+            )
+
+    async def _send_attachment(
+        self,
+        event: TelegramCallbackQueryEvent,
+        raw: bytes,
+        index: int,
+    ) -> None:
+        filename, content, _ = extract_attachment_payload(raw, index)
+        max_size_mb = self._config_int("max_attachment_mb", 20)
+        if len(content) > max_size_mb * 1024 * 1024:
+            raise ValueError(f"附件超过限制: {max_size_mb} MB")
+        temp_dir = Path(get_astrbot_temp_path()) / PLUGIN_NAME
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / self._safe_filename(filename)
+        path.write_bytes(content)
+        chain = MessageChain(
+            [Plain(f"附件: {filename}"), File(name=filename, file=str(path))]
+        )
+        chat_id = self._callback_chat_id(event)
+        await TelegramPlatformEvent.send_with_client(event.client, chain, chat_id)
+
+    async def _cmd_send(self, args: list[str]) -> str:
+        if len(args) < 2:
+            return "用法: /mail send <account_id> <to> | <subject> | <body>"
+        account = self._account(args[0])
+        text = " ".join(args[1:])
+        fields = [part.strip() for part in text.split("|", 2)]
+        if len(fields) != 3:
+            return "用法: /mail send <account_id> <to> | <subject> | <body>"
+        to_text, subject, body = fields
+        recipients = [item.strip() for item in to_text.split(",") if item.strip()]
+        await asyncio.to_thread(
+            self.mail_client.send_mail,
+            account,
+            recipients,
+            subject,
+            body,
+        )
+        return f"已发送至 {', '.join(recipients)}"
+
+    async def _cmd_reply(self, args: list[str]) -> str:
+        if len(args) < 2:
+            return "用法: /mail reply <token> <回复内容>"
+        token = args[0]
+        payload = self.store.get_token(token)
+        if not payload:
+            return "邮件上下文已过期，请重新检查"
+        account = self._account(payload["account_id"])
+        body = " ".join(args[1:]).strip()
+        if not body:
+            return "回复内容不能为空"
+        raw = Path(payload["raw_path"]).read_bytes()
+        parsed = parse_message(
+            raw,
+            account_id=account.account_id,
+            folder=payload["folder"],
+            uid=payload["uid"],
+        )
+        subject = parsed.subject
+        if not subject.lower().startswith("re:"):
+            subject = f"Re: {subject}"
+        await asyncio.to_thread(
+            self.mail_client.send_mail,
+            account,
+            [parsed.sender_email],
+            subject,
+            body,
+            in_reply_to=parsed.message_id,
+            references=parsed.message_id,
+        )
+        return f"已回复 {parsed.sender_email}"
+
+    def _cmd_unblock(self, args: list[str]) -> str:
+        if len(args) != 2:
+            return "用法: /mail unblock <account_id> <sender-or-domain>"
+        account_id, sender = args
+        self._account(account_id)
+        removed = self.store.unblock_sender(account_id, sender)
+        self.store.save()
+        return "已解除屏蔽。" if removed else "未找到该屏蔽项。"
+
+    def _mail_card(
+        self,
+        account: MailAccount,
+        parsed: ParsedMail,
+        token: str,
+    ) -> MessageChain:
+        preview = self._truncate(parsed.body_text, self._preview_length())
+        text = (
+            f"📬 {account.display_name}\n"
+            f"From: {parsed.sender}\n"
+            f"Subject: {parsed.subject}\n"
+            f"Date: {parsed.date or '-'}\n"
+            f"Attachments: {len(parsed.attachments)}\n\n"
+            f"{preview or '(No text content)'}"
+        )
+        buttons = [
+            [
+                {"text": "More", "callback_data": f"{CALLBACK_PREFIX}:{token}:more:0"},
+                {
+                    "text": "Action",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:action",
+                },
+            ]
+        ]
+        if parsed.attachments:
+            buttons.insert(
+                0,
+                [
+                    {
+                        "text": f"Attachments ({len(parsed.attachments)})",
+                        "callback_data": f"{CALLBACK_PREFIX}:{token}:attachments",
+                    }
+                ],
+            )
+        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+
+    def _full_text_card(
+        self,
+        account: MailAccount,
+        parsed: ParsedMail,
+        token: str,
+        page: int,
+    ) -> MessageChain:
+        body = parsed.body_text or "(No text content)"
+        pages = self._paginate(body, self._page_size())
+        page = max(0, min(page, len(pages) - 1))
+        text = (
+            f"📖 {account.display_name} · {parsed.subject}\n"
+            f"Page {page + 1}/{len(pages)}\n\n"
+            f"{pages[page]}"
+        )
+        nav = []
+        if page > 0:
+            nav.append(
+                {
+                    "text": "Prev",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:more:{page - 1}",
+                }
+            )
+        if page < len(pages) - 1:
+            nav.append(
+                {
+                    "text": "Next",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:more:{page + 1}",
+                }
+            )
+        buttons = []
+        if nav:
+            buttons.append(nav)
+        buttons.append(
+            [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}]
+        )
+        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+
+    def _attachments_card(self, parsed: ParsedMail, token: str) -> MessageChain:
+        if not parsed.attachments:
+            return MessageChain([Plain("这封邮件没有附件。")])
+        lines = ["📎 附件列表"]
+        buttons = []
+        for attachment in parsed.attachments:
+            size = self._format_size(attachment.size)
+            lines.append(f"{attachment.index + 1}. {attachment.filename} ({size})")
+            buttons.append(
+                [
+                    {
+                        "text": f"发送 {attachment.index + 1}",
+                        "callback_data": f"{CALLBACK_PREFIX}:{token}:att:{attachment.index}",
+                    }
+                ]
+            )
+        buttons.append(
+            [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}]
+        )
+        return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
+
+    def _action_card(self, parsed: ParsedMail, token: str) -> MessageChain:
+        text = f"⚙️ 邮件操作\n{parsed.subject}\nFrom: {parsed.sender}"
+        buttons = [
+            [
+                {"text": "Reply", "callback_data": f"{CALLBACK_PREFIX}:{token}:reply"},
+                {
+                    "text": "Unsubscribe",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:unsubscribe",
+                },
+            ],
+            [
+                {
+                    "text": "Block Sender",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:block",
+                },
+                {
+                    "text": "Archive",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:archive",
+                },
+            ],
+            [
+                {
+                    "text": "Delete",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:delete",
+                },
+                {
+                    "text": "Mark Read",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:read",
+                },
+                {
+                    "text": "Mark Unread",
+                    "callback_data": f"{CALLBACK_PREFIX}:{token}:unread",
+                },
+            ],
+            [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}],
+        ]
+        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+
+    def _unsubscribe_card(self, parsed: ParsedMail, token: str) -> MessageChain:
+        lines = [f"退订信息\n{parsed.subject}"]
+        buttons = []
+        for idx, url in enumerate(parsed.unsubscribe_urls, start=1):
+            buttons.append([{"text": f"Open unsubscribe link {idx}", "url": url}])
+        if parsed.unsubscribe_mailtos:
+            lines.append("\nMailto:")
+            lines.extend(parsed.unsubscribe_mailtos)
+        if not buttons and not parsed.unsubscribe_mailtos:
+            lines.append("\n未找到 List-Unsubscribe 或正文退订链接。")
+        buttons.append(
+            [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:action"}]
+        )
+        return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
+
+    def _render_status(self) -> str:
+        accounts = self._accounts()
+        if not accounts:
+            return "未配置邮箱账号。"
+        lines = ["Telegram Mail 状态"]
+        for account in accounts:
+            status = "enabled" if account.enabled else "disabled"
+            last_check = self.store.last_check(account.account_id) or "-"
+            last_error = self.store.last_error(account.account_id)
+            lines.append(
+                f"- {account.account_id} ({account.display_name}): {status}, "
+                f"last_check={last_check}, target={account.target_chat_id}"
+            )
+            if last_error:
+                lines.append(f"  error={last_error}")
+        return "\n".join(lines)
+
+    def _render_blocklist(self, account_id: str) -> str:
+        account_ids = (
+            [account_id] if account_id else [a.account_id for a in self._accounts()]
+        )
+        lines = ["本地屏蔽列表"]
+        for current in account_ids:
+            blocked = self.store.blocked_senders(current)
+            values = ", ".join(blocked) if blocked else "(empty)"
+            lines.append(f"- {current}: {values}")
+        return "\n".join(lines)
+
+    def _action_done_text(self, parsed: ParsedMail, op: str) -> str:
+        labels = {
+            "archive": "已归档",
+            "delete": "已删除",
+            "read": "已标记已读",
+            "unread": "已标记未读",
+        }
+        return f"{labels.get(op, '已完成')}: {parsed.subject}"
+
+    def _accounts(self) -> list[MailAccount]:
+        raw_accounts = self.config.get("accounts")
+        if not raw_accounts:
+            raw_json = self.config.get("accounts_json", "[]")
+            try:
+                raw_accounts = json.loads(raw_json or "[]")
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"accounts_json 不是合法 JSON: {exc}") from exc
+        if not isinstance(raw_accounts, list):
+            raise ValueError("accounts/accounts_json 必须是账号数组")
+        return [self._parse_account(item) for item in raw_accounts]
+
+    def _account(self, account_id: str) -> MailAccount:
+        for account in self._accounts():
+            if account.account_id == account_id:
+                return account
+        raise ValueError(f"未知账号: {account_id}")
+
+    def _parse_account(self, item: dict[str, Any]) -> MailAccount:
+        if not isinstance(item, dict):
+            raise ValueError("账号配置必须是对象")
+        account_id = str(item.get("account_id") or item.get("id") or "").strip()
+        if not account_id:
+            raise ValueError("账号缺少 account_id")
+        imap_user = str(item.get("imap_user") or item.get("username") or "").strip()
+        smtp_user = str(item.get("smtp_user") or imap_user).strip()
+        imap_folders = item.get("imap_folders") or ["INBOX"]
+        if isinstance(imap_folders, str):
+            imap_folders = [imap_folders]
+        account = MailAccount(
+            account_id=account_id,
+            display_name=str(item.get("display_name") or account_id),
+            enabled=bool(item.get("enabled", True)),
+            target_chat_id=str(item.get("target_chat_id") or "").strip(),
+            platform_id=str(item.get("platform_id") or "telegram"),
+            message_type=str(item.get("message_type") or "friend"),
+            imap_host=str(item.get("imap_host") or "").strip(),
+            imap_port=int(item.get("imap_port") or 993),
+            imap_user=imap_user,
+            imap_password=str(item.get("imap_password") or item.get("password") or ""),
+            imap_tls=bool(item.get("imap_tls", True)),
+            imap_folders=[str(folder) for folder in imap_folders],
+            smtp_host=str(item.get("smtp_host") or "").strip(),
+            smtp_port=int(item.get("smtp_port") or 465),
+            smtp_user=smtp_user,
+            smtp_password=str(item.get("smtp_password") or item.get("password") or ""),
+            smtp_tls=str(item.get("smtp_tls") or "ssl").lower(),
+            from_address=str(item.get("from_address") or smtp_user or imap_user),
+            archive_folder=str(item.get("archive_folder") or "Archive"),
+            trash_folder=str(item.get("trash_folder") or "Trash"),
+            poll_interval=int(
+                item.get("poll_interval") or self._config_int("poll_interval", 300)
+            ),
+        )
+        self._validate_account(account)
+        return account
+
+    @staticmethod
+    def _validate_account(account: MailAccount) -> None:
+        if not account.enabled:
+            return
+        required = {
+            "target_chat_id": account.target_chat_id,
+            "imap_host": account.imap_host,
+            "imap_user": account.imap_user,
+            "imap_password": account.imap_password,
+        }
+        missing = [key for key, value in required.items() if not value]
+        if missing:
+            raise ValueError(
+                f"账号 {account.account_id} 缺少必填字段: {', '.join(missing)}"
+            )
+
+    def _parse_command_args(self, raw: str) -> list[str]:
+        text = re.sub(r"^/mail(?:@\S+)?", "", raw, count=1).strip()
+        if not text:
+            return []
+        try:
+            return shlex.split(text)
+        except ValueError:
+            return text.split()
+
+    def _callback_chat_id(self, event: TelegramCallbackQueryEvent) -> str:
+        if not event.message:
+            return event.get_sender_id()
+        chat_id = str(event.message.chat.id)
+        thread_id = getattr(event.message, "message_thread_id", None)
+        return f"{chat_id}#{thread_id}" if thread_id else chat_id
+
+    @staticmethod
+    def _message_type(value: str) -> MessageType:
+        if value.lower() in {"group", "group_message"}:
+            return MessageType.GROUP_MESSAGE
+        return MessageType.FRIEND_MESSAGE
+
+    @staticmethod
+    def _truncate(value: str, limit: int) -> str:
+        value = value.strip()
+        if len(value) <= limit:
+            return value
+        return value[: limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _paginate(value: str, size: int) -> list[str]:
+        value = value.strip() or "(No text content)"
+        return [value[i : i + size] for i in range(0, len(value), size)] or [value]
+
+    @staticmethod
+    def _format_size(size: int) -> str:
+        if size < 1024:
+            return f"{size} B"
+        if size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        return f"{size / 1024 / 1024:.1f} MB"
+
+    @staticmethod
+    def _safe_filename(value: str) -> str:
+        value = re.sub(r"[\\/:*?\"<>|]+", "_", value).strip()
+        return value or "attachment.bin"
+
+    def _preview_length(self) -> int:
+        return self._config_int("preview_length", DEFAULT_PREVIEW_LENGTH)
+
+    def _page_size(self) -> int:
+        return self._config_int("page_size", DEFAULT_PAGE_SIZE)
+
+    def _config_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _config_bool(self, key: str, default: bool) -> bool:
+        value = self.config.get(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "Telegram Mail 命令:\n"
+            "/mail status\n"
+            "/mail check [account_id]\n"
+            "/mail send <account_id> <to> | <subject> | <body>\n"
+            "/mail reply <token> <body>\n"
+            "/mail blocklist [account_id]\n"
+            "/mail unblock <account_id> <sender-or-domain>"
+        )
