@@ -48,6 +48,7 @@ MICROSOFT_OUTLOOK_SCOPE = (
     "https://outlook.office.com/IMAP.AccessAsUser.All "
     "https://outlook.office.com/SMTP.Send offline_access"
 )
+OWNER_ID_FALLBACK = "default"
 MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
 
 
@@ -127,24 +128,29 @@ class TelegramMailPlugin(Star):
             return
 
         command = args[0].lower()
+        owner_id = self._event_owner_id(event)
         try:
             if command == "status":
-                yield event.plain_result(self._render_status())
+                yield event.plain_result(self._render_status(owner_id))
             elif command == "check":
                 account_id = args[1] if len(args) > 1 else ""
-                count = await self._check_now(account_id)
+                count = await self._check_now(account_id, owner_id)
                 yield event.plain_result(f"检查完成，新增推送 {count} 封邮件。")
             elif command == "send":
-                yield event.plain_result(await self._cmd_send(args[1:]))
+                yield event.plain_result(await self._cmd_send(args[1:], owner_id))
             elif command == "reply":
-                yield event.plain_result(await self._cmd_reply(args[1:]))
+                yield event.plain_result(await self._cmd_reply(args[1:], owner_id))
             elif command == "oauth":
-                yield event.plain_result(await self._cmd_oauth(args[1:]))
+                yield event.plain_result(await self._cmd_oauth(args[1:], owner_id))
+            elif command == "add":
+                yield event.plain_result(self._cmd_add(args[1:], owner_id))
+            elif command == "remove":
+                yield event.plain_result(self._cmd_remove(args[1:], owner_id))
             elif command == "blocklist":
                 account_id = args[1] if len(args) > 1 else ""
-                yield event.plain_result(self._render_blocklist(account_id))
+                yield event.plain_result(self._render_blocklist(account_id, owner_id))
             elif command == "unblock":
-                yield event.plain_result(self._cmd_unblock(args[1:]))
+                yield event.plain_result(self._cmd_unblock(args[1:], owner_id))
             else:
                 yield event.plain_result(self._help_text())
         except Exception as exc:
@@ -166,7 +172,8 @@ class TelegramMailPlugin(Star):
 
         token = parts[1]
         op = parts[2]
-        payload = self.store.get_token(token)
+        owner_id = self._event_owner_id(event)
+        payload = self.store.get_token(owner_id, token)
         if not payload:
             await event.answer_callback_query("邮件上下文已过期，请重新检查")
             event.stop_event()
@@ -185,12 +192,12 @@ class TelegramMailPlugin(Star):
             try:
                 self._set_account_mode(account, "polling")
                 await self._poll_account(account, push=True)
-                self.store.clear_last_error(account.account_id)
+                self.store.clear_last_error(account.owner_id, account.account_id)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("Mail poll failed for account %s", account.account_id)
-                self.store.set_last_error(account.account_id, str(exc))
+                self.store.set_last_error(account.owner_id, account.account_id, str(exc))
                 self.store.save()
 
             await self._sleep_poll_interval(account)
@@ -201,7 +208,7 @@ class TelegramMailPlugin(Star):
             try:
                 if time.monotonic() - last_resync >= max(account.poll_interval, 30):
                     await self._poll_folder(account, folder, push=True)
-                    self.store.clear_last_error(account.account_id)
+                    self.store.clear_last_error(account.owner_id, account.account_id)
                     last_resync = time.monotonic()
 
                 self._set_folder_mode(account, folder, "idle")
@@ -215,7 +222,7 @@ class TelegramMailPlugin(Star):
                 )
                 if changed:
                     await self._poll_folder(account, folder, push=True)
-                    self.store.clear_last_error(account.account_id)
+                    self.store.clear_last_error(account.owner_id, account.account_id)
                     last_resync = time.monotonic()
             except asyncio.CancelledError:
                 raise
@@ -223,7 +230,7 @@ class TelegramMailPlugin(Star):
                 self._set_folder_mode(account, folder, "polling fallback")
                 try:
                     await self._poll_folder(account, folder, push=True)
-                    self.store.clear_last_error(account.account_id)
+                    self.store.clear_last_error(account.owner_id, account.account_id)
                     last_resync = time.monotonic()
                 except asyncio.CancelledError:
                     raise
@@ -233,7 +240,7 @@ class TelegramMailPlugin(Star):
                         account.account_id,
                         folder,
                     )
-                    self.store.set_last_error(account.account_id, str(exc))
+                    self.store.set_last_error(account.owner_id, account.account_id, str(exc))
                     self.store.save()
                 await self._sleep_poll_interval(account)
             except Exception as exc:
@@ -243,7 +250,7 @@ class TelegramMailPlugin(Star):
                     folder,
                 )
                 self._set_folder_mode(account, folder, "polling fallback")
-                self.store.set_last_error(account.account_id, str(exc))
+                self.store.set_last_error(account.owner_id, account.account_id, str(exc))
                 self.store.save()
                 await self._sleep_poll_interval(account)
 
@@ -256,8 +263,10 @@ class TelegramMailPlugin(Star):
         except asyncio.TimeoutError:
             pass
 
-    async def _check_now(self, account_id: str = "") -> int:
+    async def _check_now(self, account_id: str = "", owner_id: str | None = None) -> int:
         accounts = self._accounts()
+        if owner_id is not None:
+            accounts = [account for account in accounts if account.owner_id == owner_id]
         if account_id:
             accounts = [
                 account for account in accounts if account.account_id == account_id
@@ -286,11 +295,11 @@ class TelegramMailPlugin(Star):
         total = 0
         uids = await asyncio.to_thread(self.mail_client.list_uids, account, folder)
         current = set(uids)
-        seen = self.store.get_seen(account.account_id, folder)
-        if not self.store.is_initialized(account.account_id, folder):
-            self.store.set_initialized(account.account_id, folder)
+        seen = self.store.get_seen(account.owner_id, account.account_id, folder)
+        if not self.store.is_initialized(account.owner_id, account.account_id, folder):
+            self.store.set_initialized(account.owner_id, account.account_id, folder)
             if not self._config_bool("notify_existing_on_first_run", False):
-                self.store.set_seen(account.account_id, folder, current)
+                self.store.set_seen(account.owner_id, account.account_id, folder, current)
                 self._mark_account_checked(account)
                 return 0
 
@@ -309,8 +318,12 @@ class TelegramMailPlugin(Star):
                 folder=folder,
                 uid=uid,
             )
-            self.store.add_seen(account.account_id, folder, uid)
-            if self.store.is_blocked(account.account_id, parsed.sender_email):
+            self.store.add_seen(account.owner_id, account.account_id, folder, uid)
+            if self.store.is_blocked(
+                account.owner_id,
+                account.account_id,
+                parsed.sender_email,
+            ):
                 continue
             if push:
                 await self._push_mail_card(account, parsed, raw)
@@ -321,6 +334,7 @@ class TelegramMailPlugin(Star):
 
     def _mark_account_checked(self, account: MailAccount) -> None:
         self.store.set_last_check(
+            account.owner_id,
             account.account_id,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
@@ -332,9 +346,11 @@ class TelegramMailPlugin(Star):
         parsed: ParsedMail,
         raw: bytes,
     ) -> None:
-        raw_path = self.store.save_raw_message(raw)
+        raw_path = self.store.save_raw_message(account.owner_id, raw)
         token = self.store.put_token(
+            account.owner_id,
             {
+                "owner_id": account.owner_id,
                 "account_id": account.account_id,
                 "folder": parsed.folder,
                 "uid": parsed.uid,
@@ -365,7 +381,12 @@ class TelegramMailPlugin(Star):
         args: list[str],
         payload: dict[str, Any],
     ) -> None:
-        account = self._account(payload["account_id"])
+        owner_id = self._event_owner_id(event)
+        payload_owner_id = str(payload.get("owner_id") or owner_id)
+        if payload_owner_id != owner_id:
+            await event.answer_callback_query("无权操作此邮件", show_alert=True)
+            return
+        account = self._account(payload["account_id"], owner_id)
         raw = Path(payload["raw_path"]).read_bytes()
         parsed = parse_message(
             raw,
@@ -405,7 +426,7 @@ class TelegramMailPlugin(Star):
             await event.answer_callback_query()
             return
         if op == "block":
-            self.store.block_sender(account.account_id, parsed.sender_email)
+            self.store.block_sender(account.owner_id, account.account_id, parsed.sender_email)
             self.store.save()
             event.set_result(
                 _message_chain_result(
@@ -500,10 +521,10 @@ class TelegramMailPlugin(Star):
         chat_id = self._callback_chat_id(event)
         await TelegramPlatformEvent.send_with_client(event.client, chain, chat_id)
 
-    async def _cmd_send(self, args: list[str]) -> str:
+    async def _cmd_send(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
         if len(args) < 2:
             return "用法: /mail send <account_id> <to> | <subject> | <body>"
-        account = self._account(args[0])
+        account = self._account(args[0], owner_id)
         text = " ".join(args[1:])
         fields = [part.strip() for part in text.split("|", 2)]
         if len(fields) != 3:
@@ -519,14 +540,17 @@ class TelegramMailPlugin(Star):
         )
         return f"已发送至 {', '.join(recipients)}"
 
-    async def _cmd_reply(self, args: list[str]) -> str:
+    async def _cmd_reply(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
         if len(args) < 2:
             return "用法: /mail reply <token> <回复内容>"
         token = args[0]
-        payload = self.store.get_token(token)
+        payload = self.store.get_token(owner_id, token)
         if not payload:
             return "邮件上下文已过期，请重新检查"
-        account = self._account(payload["account_id"])
+        payload_owner_id = str(payload.get("owner_id") or owner_id)
+        if payload_owner_id != owner_id:
+            return "无权操作此邮件"
+        account = self._account(payload["account_id"], owner_id)
         body = " ".join(args[1:]).strip()
         if not body:
             return "回复内容不能为空"
@@ -551,10 +575,10 @@ class TelegramMailPlugin(Star):
         )
         return f"已回复 {parsed.sender_email}"
 
-    async def _cmd_oauth(self, args: list[str]) -> str:
+    async def _cmd_oauth(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
         if len(args) != 1:
             return "用法: /mail oauth <account_id>"
-        account = self._account(args[0])
+        account = self._account(args[0], owner_id)
         if "oauth2" not in {account.imap_auth_type, account.smtp_auth_type}:
             return f"账号 {account.account_id} 未启用 OAuth2。"
         if not account.oauth2_client_id:
@@ -677,11 +701,15 @@ class TelegramMailPlugin(Star):
         payload: dict[str, Any],
     ) -> None:
         access_token = str(payload.get("access_token") or "")
-        refresh_token = str(payload.get("refresh_token") or account.oauth2_refresh_token)
+        refresh_token = str(
+            payload.get("refresh_token") or account.oauth2_refresh_token
+        )
         expires_at = float(
-            payload.get("expires_at") or time.time() + int(payload.get("expires_in") or 3600)
+            payload.get("expires_at")
+            or time.time() + int(payload.get("expires_in") or 3600)
         )
         self.store.set_oauth2_state(
+            account.owner_id,
             account.account_id,
             {
                 "access_token": access_token,
@@ -693,7 +721,7 @@ class TelegramMailPlugin(Star):
         self.store.save()
 
     def _load_oauth2_token_state(self, account: MailAccount) -> dict[str, Any]:
-        return self.store.get_oauth2_state(account.account_id)
+        return self.store.get_oauth2_state(account.owner_id, account.account_id)
 
     async def _send_account_notice(self, account: MailAccount, text: str) -> None:
         session = MessageSession(
@@ -703,12 +731,37 @@ class TelegramMailPlugin(Star):
         )
         await self.context.send_message(session, MessageChain([Plain(text)]))
 
-    def _cmd_unblock(self, args: list[str]) -> str:
+    def _cmd_add(self, args: list[str], owner_id: str) -> str:
+        raw = " ".join(args).strip()
+        if not raw:
+            return "用法: /mail add <账号JSON>"
+        try:
+            account_config = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return f"账号 JSON 无效: {exc}"
+        if not isinstance(account_config, dict):
+            return "账号 JSON 必须是对象。"
+
+        account = self._parse_account(account_config, owner_id)
+        self.store.set_account_config(owner_id, account.account_id, account_config)
+        self.store.save()
+        return f"已保存账号 {account.account_id}。重启插件后会开始后台监听；也可以先执行 /mail check {account.account_id}。"
+
+    def _cmd_remove(self, args: list[str], owner_id: str) -> str:
+        if len(args) != 1:
+            return "用法: /mail remove <account_id>"
+        removed = self.store.remove_account_config(owner_id, args[0])
+        self.store.save()
+        return "已删除账号。" if removed else "未找到该账号。"
+
+    def _cmd_unblock(
+        self, args: list[str], owner_id: str = OWNER_ID_FALLBACK
+    ) -> str:
         if len(args) != 2:
             return "用法: /mail unblock <account_id> <sender-or-domain>"
         account_id, sender = args
-        self._account(account_id)
-        removed = self.store.unblock_sender(account_id, sender)
+        self._account(account_id, owner_id)
+        removed = self.store.unblock_sender(owner_id, account_id, sender)
         self.store.save()
         return "已解除屏蔽。" if removed else "未找到该屏蔽项。"
 
@@ -860,17 +913,17 @@ class TelegramMailPlugin(Star):
         )
         return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
 
-    def _render_status(self) -> str:
-        accounts = self._accounts()
+    def _render_status(self, owner_id: str = OWNER_ID_FALLBACK) -> str:
+        accounts = [account for account in self._accounts() if account.owner_id == owner_id]
         if not accounts:
             return "未配置邮箱账号。"
         lines = ["Telegram Mail 状态"]
         for account in accounts:
             status = "enabled" if account.enabled else "disabled"
             mode = self._account_mode(account)
-            last_check = self.store.last_check(account.account_id) or "-"
-            last_error = self.store.last_error(account.account_id)
-            oauth2_state = self.store.get_oauth2_state(account.account_id)
+            last_check = self.store.last_check(owner_id, account.account_id) or "-"
+            last_error = self.store.last_error(owner_id, account.account_id)
+            oauth2_state = self.store.get_oauth2_state(owner_id, account.account_id)
             oauth2_status = "authorized" if oauth2_state.get("access_token") else "unauthorized"
             lines.append(
                 f"- {account.account_id} ({account.display_name}): {status}, "
@@ -880,13 +933,17 @@ class TelegramMailPlugin(Star):
                 lines.append(f"  error={last_error}")
         return "\n".join(lines)
 
-    def _render_blocklist(self, account_id: str) -> str:
+    def _render_blocklist(
+        self, account_id: str, owner_id: str = OWNER_ID_FALLBACK
+    ) -> str:
         account_ids = (
-            [account_id] if account_id else [a.account_id for a in self._accounts()]
+            [account_id]
+            if account_id
+            else [a.account_id for a in self._accounts() if a.owner_id == owner_id]
         )
         lines = ["本地屏蔽列表"]
         for current in account_ids:
-            blocked = self.store.blocked_senders(current)
+            blocked = self.store.blocked_senders(owner_id, current)
             values = ", ".join(blocked) if blocked else "(empty)"
             lines.append(f"- {current}: {values}")
         return "\n".join(lines)
@@ -901,24 +958,46 @@ class TelegramMailPlugin(Star):
         return f"{labels.get(op, '已完成')}: {parsed.subject}"
 
     def _accounts(self) -> list[MailAccount]:
+        accounts: list[MailAccount] = []
+
         raw_accounts = self.config.get("accounts")
-        if not raw_accounts:
+        if raw_accounts:
+            if not isinstance(raw_accounts, list):
+                raise ValueError("accounts/accounts_json 必须是账号数组")
+            for item in raw_accounts:
+                accounts.append(self._parse_account(item, OWNER_ID_FALLBACK))
+        else:
             raw_json = self.config.get("accounts_json", "[]")
             try:
-                raw_accounts = json.loads(raw_json or "[]")
+                raw_json_accounts = json.loads(raw_json or "[]")
             except json.JSONDecodeError as exc:
                 raise ValueError(f"accounts_json 不是合法 JSON: {exc}") from exc
-        if not isinstance(raw_accounts, list):
-            raise ValueError("accounts/accounts_json 必须是账号数组")
-        return [self._parse_account(item) for item in raw_accounts]
+            if not isinstance(raw_json_accounts, list):
+                raise ValueError("accounts/accounts_json 必须是账号数组")
+            for item in raw_json_accounts:
+                accounts.append(self._parse_account(item, OWNER_ID_FALLBACK))
 
-    def _account(self, account_id: str) -> MailAccount:
-        for account in self._accounts():
-            if account.account_id == account_id:
-                return account
+        for owner_id, item in self.store.all_account_configs():
+            accounts.append(self._parse_account(item, owner_id))
+
+        return accounts
+
+    def _account(self, account_id: str, owner_id: str | None = None) -> MailAccount:
+        accounts = self._accounts()
+        if owner_id is not None:
+            for account in accounts:
+                if account.account_id == account_id and account.owner_id == owner_id:
+                    return account
+            raise ValueError(f"未知账号: {account_id}")
+
+        matches = [account for account in accounts if account.account_id == account_id]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise ValueError(f"账号 {account_id} 存在多个所有者，请补充用户上下文")
         raise ValueError(f"未知账号: {account_id}")
 
-    def _parse_account(self, item: dict[str, Any]) -> MailAccount:
+    def _parse_account(self, item: dict[str, Any], owner_id: str) -> MailAccount:
         if not isinstance(item, dict):
             raise ValueError("账号配置必须是对象")
         account_id = str(item.get("account_id") or item.get("id") or "").strip()
@@ -939,8 +1018,9 @@ class TelegramMailPlugin(Star):
         oauth2_state = {}
         store = getattr(self, "store", None)
         if store is not None:
-            oauth2_state = store.get_oauth2_state(account_id)
+            oauth2_state = store.get_oauth2_state(owner_id, account_id)
         account = MailAccount(
+            owner_id=owner_id,
             account_id=account_id,
             display_name=str(item.get("display_name") or account_id),
             enabled=bool(item.get("enabled", True)),
@@ -1059,7 +1139,7 @@ class TelegramMailPlugin(Star):
             self._set_folder_mode(account, folder, mode)
 
     def _set_folder_mode(self, account: MailAccount, folder: str, mode: str) -> None:
-        self.folder_modes[(account.account_id, folder)] = mode
+        self.folder_modes[(self._account_state_key(account), folder)] = mode
 
     def _account_mode(self, account: MailAccount) -> str:
         if not account.enabled:
@@ -1067,7 +1147,7 @@ class TelegramMailPlugin(Star):
         if not account.realtime_enabled:
             return "polling"
         modes = {
-            self.folder_modes.get((account.account_id, folder), "starting")
+            self.folder_modes.get((self._account_state_key(account), folder), "starting")
             for folder in account.imap_folders
         }
         if "polling fallback" in modes:
@@ -1100,6 +1180,13 @@ class TelegramMailPlugin(Star):
     def _safe_filename(value: str) -> str:
         value = re.sub(r"[\\/:*?\"<>|]+", "_", value).strip()
         return value or "attachment.bin"
+
+    @staticmethod
+    def _account_state_key(account: MailAccount) -> str:
+        return f"{account.owner_id}:{account.account_id}"
+
+    def _event_owner_id(self, event: AstrMessageEvent) -> str:
+        return _normalize_owner_id(event.get_sender_id() or event.session.session_id)
 
     def _preview_length(self) -> int:
         return self._config_int("preview_length", DEFAULT_PREVIEW_LENGTH)
@@ -1152,3 +1239,12 @@ class OAuth2AuthorizationPending(RuntimeError):
 
 class OAuth2SlowDown(RuntimeError):
     pass
+
+
+def _normalize_owner_id(value: str) -> str:
+    value = str(value or "").strip()
+    if not value:
+        return OWNER_ID_FALLBACK
+    if ":" in value:
+        return value.rsplit(":", 1)[-1].strip() or OWNER_ID_FALLBACK
+    return value

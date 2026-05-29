@@ -4,6 +4,7 @@ from astrbot_plugin_telegram_mail.models import MailAccount
 
 def _account(**overrides):
     values = {
+        "owner_id": "u1",
         "account_id": "outlook",
         "display_name": "Outlook",
         "enabled": True,
@@ -92,6 +93,7 @@ def test_oauth2_access_token_uses_loader_state():
     client = MailClient(
         oauth2_token_loader=lambda account: {
             "access_token": "stored-access",
+            "refresh_token": "stored-refresh",
             "expires_at": 9999999999.0,
         }
     )
@@ -126,3 +128,39 @@ def test_oauth2_refresh_updates_persistent_state(monkeypatch):
     assert client._oauth2_access_token(account) == "new-access"
     assert updates[0]["refresh_token"] == "new-refresh"
     assert updates[0]["expires_at"] > 0
+
+
+def test_oauth2_access_token_prefers_stored_refresh_token(monkeypatch):
+    client = MailClient(
+        oauth2_token_loader=lambda account: {
+            "access_token": "",
+            "refresh_token": "stored-refresh",
+            "expires_at": 0,
+        }
+    )
+
+    called = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self):
+            return b'{"access_token":"new-access","expires_in":3600}'
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.urllib.request.urlopen",
+        lambda request, timeout: Response(),
+    )
+
+    def updater(account, payload):
+        called.append(payload)
+
+    client._oauth2_token_updater = updater
+    account = _account(oauth2_access_token="", oauth2_refresh_token="", oauth2_client_id="client-id")
+
+    assert client._oauth2_access_token(account) == "new-access"
+    assert called[0]["access_token"] == "new-access"

@@ -6,6 +6,7 @@ from datetime import datetime
 
 @dataclass(slots=True)
 class MailAccount:
+    owner_id: str
     account_id: str
     display_name: str
     enabled: bool

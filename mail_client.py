@@ -220,11 +220,11 @@ class MailClient:
             return cached[0]
 
         stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
-        access_token = str(account.oauth2_access_token or stored.get("access_token") or "")
+        access_token = str(stored.get("access_token") or account.oauth2_access_token or "")
         refresh_token = str(
-            account.oauth2_refresh_token or stored.get("refresh_token") or ""
+            stored.get("refresh_token") or account.oauth2_refresh_token or ""
         )
-        expires_at = float(account.oauth2_expires_at or stored.get("expires_at") or 0)
+        expires_at = float(stored.get("expires_at") or account.oauth2_expires_at or 0)
 
         if access_token and expires_at > now + 60:
             self._oauth2_cache[cache_key] = (access_token, expires_at)

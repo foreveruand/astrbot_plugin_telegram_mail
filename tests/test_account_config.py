@@ -23,21 +23,23 @@ def _account_config(**overrides):
 
 
 def test_realtime_defaults_to_enabled():
-    account = _plugin()._parse_account(_account_config())
+    account = _plugin()._parse_account(_account_config(), "u1")
 
+    assert account.owner_id == "u1"
     assert account.realtime_enabled is True
     assert account.idle_timeout == DEFAULT_IDLE_TIMEOUT
 
 
 def test_realtime_can_be_disabled_per_account():
-    account = _plugin()._parse_account(_account_config(realtime_enabled=False))
+    account = _plugin()._parse_account(_account_config(realtime_enabled=False), "u1")
 
     assert account.realtime_enabled is False
 
 
 def test_idle_timeout_can_be_overridden_per_account():
     account = _plugin({"idle_timeout": 1200})._parse_account(
-        _account_config(idle_timeout=600)
+        _account_config(idle_timeout=600),
+        "u1",
     )
 
     assert account.idle_timeout == 600
@@ -45,7 +47,8 @@ def test_idle_timeout_can_be_overridden_per_account():
 
 def test_realtime_uses_global_default_when_account_omits_value():
     account = _plugin({"realtime_enabled": False, "idle_timeout": 900})._parse_account(
-        _account_config()
+        _account_config(),
+        "u1",
     )
 
     assert account.realtime_enabled is False
@@ -59,7 +62,8 @@ def test_outlook_provider_uses_oauth2_defaults():
             imap_host="",
             imap_password="",
             oauth2_access_token="token",
-        )
+        ),
+        "u1",
     )
 
     assert account.imap_host == "outlook.office365.com"
@@ -77,7 +81,8 @@ def test_oauth2_account_accepts_refresh_token_without_password():
             imap_password="",
             oauth2_refresh_token="refresh",
             oauth2_client_id="client-id",
-        )
+        ),
+        "u1",
     )
 
     assert account.imap_auth_type == "oauth2"
@@ -91,7 +96,8 @@ def test_oauth2_account_accepts_client_id_before_authorization():
             imap_host="",
             imap_password="",
             oauth2_client_id="client-id",
-        )
+        ),
+        "u1",
     )
 
     assert account.oauth2_access_token == ""
@@ -101,7 +107,8 @@ def test_oauth2_account_accepts_client_id_before_authorization():
 
 def test_oauth2_account_reads_saved_token_state():
     class Store:
-        def get_oauth2_state(self, account_id):
+        def get_oauth2_state(self, owner_id, account_id):
+            assert owner_id == "u1"
             assert account_id == "a1"
             return {
                 "access_token": "stored-access",
@@ -116,7 +123,8 @@ def test_oauth2_account_reads_saved_token_state():
             auth_type="oauth2",
             imap_password="",
             oauth2_client_id="client-id",
-        )
+        ),
+        "u1",
     )
 
     assert account.oauth2_access_token == "stored-access"
