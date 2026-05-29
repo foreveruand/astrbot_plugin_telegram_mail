@@ -168,3 +168,36 @@ def test_oauth2_account_reads_saved_token_state():
     assert account.oauth2_access_token == "stored-access"
     assert account.oauth2_refresh_token == "stored-refresh"
     assert account.oauth2_expires_at == 123.0
+
+
+def test_oauth2_token_save_keeps_current_stored_refresh_token():
+    states = {("u1", "a1"): {"refresh_token": "stored-refresh"}}
+
+    class Store:
+        def get_oauth2_state(self, owner_id, account_id):
+            return states.get((owner_id, account_id), {})
+
+        def set_oauth2_state(self, owner_id, account_id, payload):
+            states[(owner_id, account_id)] = payload
+
+        def save(self):
+            return None
+
+    plugin = _plugin()
+    plugin.store = Store()
+    account = plugin._parse_account(
+        _account_config(
+            auth_type="oauth2",
+            imap_password="",
+            oauth2_client_id="client-id",
+            oauth2_refresh_token="old-config-refresh",
+        ),
+        "u1",
+    )
+
+    plugin._save_oauth2_token_response(
+        account,
+        {"access_token": "new-access", "expires_in": 3600},
+    )
+
+    assert states[("u1", "a1")]["refresh_token"] == "stored-refresh"

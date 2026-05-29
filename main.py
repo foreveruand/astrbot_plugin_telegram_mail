@@ -184,7 +184,7 @@ def _message_chain_result(chain: MessageChain) -> MessageEventResult:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.2",
+    "0.1.3",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -807,9 +807,14 @@ class TelegramMailPlugin(Star):
         account: MailAccount,
         payload: dict[str, Any],
     ) -> None:
+        current_state = self.store.get_oauth2_state(
+            account.owner_id, account.account_id
+        )
         access_token = str(payload.get("access_token") or "")
         refresh_token = str(
-            payload.get("refresh_token") or account.oauth2_refresh_token
+            payload.get("refresh_token")
+            or current_state.get("refresh_token")
+            or account.oauth2_refresh_token
         )
         expires_at = float(
             payload.get("expires_at")

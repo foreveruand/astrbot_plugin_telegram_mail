@@ -8,6 +8,7 @@ import smtplib
 import ssl
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterable
@@ -220,7 +221,9 @@ class MailClient:
             return cached[0]
 
         stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
-        access_token = str(stored.get("access_token") or account.oauth2_access_token or "")
+        access_token = str(
+            stored.get("access_token") or account.oauth2_access_token or ""
+        )
         refresh_token = str(
             stored.get("refresh_token") or account.oauth2_refresh_token or ""
         )
@@ -257,8 +260,23 @@ class MailClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            try:
+                error_payload = json.loads(body)
+            except json.JSONDecodeError:
+                raise RuntimeError(
+                    f"OAuth2 token refresh failed for {account.account_id}: HTTP {exc.code}"
+                ) from exc
+            error = str(error_payload.get("error") or "")
+            description = str(error_payload.get("error_description") or error)
+            raise RuntimeError(
+                f"OAuth2 token refresh failed for {account.account_id}: "
+                f"HTTP {exc.code} {description}"
+            ) from exc
         access_token = str(payload.get("access_token") or "")
         if not access_token:
             raise RuntimeError(

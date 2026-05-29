@@ -1,3 +1,6 @@
+import urllib.error
+
+import pytest
 from astrbot_plugin_telegram_mail.mail_client import MailClient
 from astrbot_plugin_telegram_mail.models import MailAccount
 
@@ -98,7 +101,9 @@ def test_oauth2_access_token_uses_loader_state():
         }
     )
 
-    assert client._oauth2_access_token(_account(oauth2_access_token="")) == "stored-access"
+    assert (
+        client._oauth2_access_token(_account(oauth2_access_token="")) == "stored-access"
+    )
 
 
 def test_oauth2_refresh_updates_persistent_state(monkeypatch):
@@ -118,7 +123,9 @@ def test_oauth2_refresh_updates_persistent_state(monkeypatch):
         "astrbot_plugin_telegram_mail.mail_client.urllib.request.urlopen",
         lambda request, timeout: Response(),
     )
-    client = MailClient(oauth2_token_updater=lambda account, payload: updates.append(payload))
+    client = MailClient(
+        oauth2_token_updater=lambda account, payload: updates.append(payload)
+    )
     account = _account(
         oauth2_access_token="",
         oauth2_refresh_token="refresh-token",
@@ -160,7 +167,40 @@ def test_oauth2_access_token_prefers_stored_refresh_token(monkeypatch):
         called.append(payload)
 
     client._oauth2_token_updater = updater
-    account = _account(oauth2_access_token="", oauth2_refresh_token="", oauth2_client_id="client-id")
+    account = _account(
+        oauth2_access_token="", oauth2_refresh_token="", oauth2_client_id="client-id"
+    )
 
     assert client._oauth2_access_token(account) == "new-access"
     assert called[0]["access_token"] == "new-access"
+
+
+def test_oauth2_refresh_error_includes_microsoft_description(monkeypatch):
+    class ErrorResponse:
+        def read(self):
+            return b'{"error":"invalid_grant","error_description":"AADSTS700082: refresh token expired"}'
+
+        def close(self):
+            return None
+
+    def raise_error(request, timeout):
+        raise urllib.error.HTTPError(
+            request.full_url,
+            400,
+            "Bad Request",
+            {},
+            ErrorResponse(),
+        )
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.urllib.request.urlopen",
+        raise_error,
+    )
+
+    account = _account(
+        oauth2_access_token="",
+        oauth2_refresh_token="refresh-token",
+        oauth2_client_id="client-id",
+    )
+    with pytest.raises(RuntimeError, match="AADSTS700082: refresh token expired"):
+        MailClient()._oauth2_access_token(account)

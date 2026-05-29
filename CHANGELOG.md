@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.3
+
+- Preserved the latest stored Outlook refresh token when Microsoft returns an access-token-only refresh response.
+- Added Microsoft OAuth refresh error details to plugin errors so `400 Bad Request` includes the underlying AADSTS reason.
+
 ## 0.1.2
 
 - Updated `/mail add` to use an interactive account setup flow for Gmail, Outlook, and QQ Mail.
