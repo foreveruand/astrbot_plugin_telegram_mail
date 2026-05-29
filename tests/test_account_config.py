@@ -74,6 +74,25 @@ def test_outlook_provider_uses_oauth2_defaults():
     assert account.smtp_auth_type == "oauth2"
 
 
+def test_outlook_provider_uses_plugin_oauth_defaults():
+    account = _plugin(
+        {
+            "oauth2_client_id": "plugin-client-id",
+            "oauth2_client_secret": "plugin-client-secret",
+        }
+    )._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+        ),
+        "u1",
+    )
+
+    assert account.oauth2_client_id == "plugin-client-id"
+    assert account.oauth2_client_secret == "plugin-client-secret"
+
+
 def test_oauth2_account_accepts_refresh_token_without_password():
     account = _plugin()._parse_account(
         _account_config(
@@ -103,6 +122,25 @@ def test_oauth2_account_accepts_client_id_before_authorization():
     assert account.oauth2_access_token == ""
     assert account.oauth2_refresh_token == ""
     assert account.oauth2_client_id == "client-id"
+
+
+def test_oauth2_account_falls_back_to_plugin_client_values():
+    account = _plugin(
+        {
+            "oauth2_client_id": "plugin-client-id",
+            "oauth2_client_secret": "plugin-client-secret",
+        }
+    )._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+        ),
+        "u1",
+    )
+
+    assert account.oauth2_client_id == "plugin-client-id"
+    assert account.oauth2_client_secret == "plugin-client-secret"
 
 
 def test_oauth2_account_reads_saved_token_state():

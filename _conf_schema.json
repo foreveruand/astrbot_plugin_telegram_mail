@@ -52,5 +52,17 @@
         "type": "int",
         "default": 500,
         "hint": "用于缓存 Telegram inline button 到邮件上下文的映射。"
+    },
+    "oauth2_client_id": {
+        "description": "Microsoft OAuth Client ID",
+        "type": "string",
+        "default": "",
+        "hint": "Outlook/Microsoft 账号未单独配置 oauth2_client_id 时使用该默认值。"
+    },
+    "oauth2_client_secret": {
+        "description": "Microsoft OAuth Client Secret",
+        "type": "string",
+        "default": "",
+        "hint": "可选。Outlook/Microsoft 账号未单独配置 oauth2_client_secret 时使用该默认值。"
     }
 }

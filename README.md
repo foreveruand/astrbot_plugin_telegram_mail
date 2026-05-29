@@ -12,11 +12,20 @@
 - `More` 按钮展示全文并支持 Prev/Next 翻页。
 - `Action` 按钮支持 Reply、Unsubscribe、Block Sender、Archive、Delete、Mark Read、Mark Unread。
 - SMTP 支持 `/mail send` 新建邮件和 `/mail reply` 回复邮件。
-- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。
+- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 和 `oauth2_client_secret` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。
 
 ## 配置
 
-邮箱账号不要写入插件设置。请由需要使用邮箱的用户私聊 bot 执行 `/mail add <账号JSON>`，插件会按用户 ID 保存账号凭据、OAuth token、邮件按钮上下文和屏蔽列表。用户 ID 取 AstrBot `unified_msg_origin` 的最后一段；不同平台和 bot 实例不会再共享同一份邮箱状态。
+邮箱账号不要写入插件设置。请由需要使用邮箱的用户私聊 bot 执行 `/mail add`，然后按提示依次选择邮箱类型、输入账号和必要参数；插件会按用户 ID 保存账号凭据、OAuth token、邮件按钮上下文和屏蔽列表。用户 ID 取 AstrBot `unified_msg_origin` 的最后一段；不同平台和 bot 实例不会再共享同一份邮箱状态。
+
+插件设置中可以提供 Microsoft OAuth 默认值：
+
+```json
+{
+  "oauth2_client_id": "your-app-client-id",
+  "oauth2_client_secret": "optional-app-secret"
+}
+```
 
 Gmail 示例：
 
@@ -49,6 +58,15 @@ Gmail 示例：
   }
 }
 ```
+
+添加 Gmail 账号时，命令会逐步询问：
+
+1. 邮箱类型，输入 `gmail`。
+2. 账号邮箱。
+3. 密码或应用专用密码。
+4. 目标会话 ID。
+
+如果你仍想直接粘贴 JSON，命令也保留兼容入口。
 
 执行时压成一行：
 
@@ -87,7 +105,7 @@ Outlook 示例：
 
 - `/mail status` 查看账号状态。
 - `/mail check [account_id]` 立即检查新邮件。
-- `/mail add <账号JSON>` 为当前用户保存邮箱账号。
+- `/mail add` 进入交互式添加流程，支持 `gmail`、`outlook`、`qq`。
 - `/mail remove <account_id>` 删除当前用户的邮箱账号和本地状态。
 - `/mail send <account_id> <to> | <subject> | <body>` 发送新邮件。
 - `/mail reply <token> <body>` 回复按钮提示中的邮件。
@@ -100,4 +118,4 @@ Outlook 示例：
 - `Unsubscribe` 只展示退订链接或 mailto，不会自动请求外部链接。
 - `Block Sender` 是插件本地屏蔽，不会创建邮箱服务端规则。
 - 密码应使用邮箱服务商提供的应用专用密码。
-- 不要把邮箱密码、OAuth token 或 client secret 写入插件设置；使用 `/mail add` 按用户保存。
+- 不要把邮箱密码或 OAuth token 写入插件设置；使用 `/mail add` 按用户保存。Microsoft OAuth client 可以放在插件设置里作为全局默认值。

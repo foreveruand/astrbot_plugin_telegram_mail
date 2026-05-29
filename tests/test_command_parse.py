@@ -23,3 +23,12 @@ def test_parse_mail_command_when_framework_passes_args_only():
         "Body",
     ]
 
+
+def test_parse_mail_command_keeps_json_compatible_payload_when_present():
+    raw = (
+        '/mail add {"account_id":"gmail-main","target_chat_id":"123456789"}'
+    )
+    assert parse_mail_command_args(raw) == [
+        "add",
+        '{"account_id":"gmail-main","target_chat_id":"123456789"}',
+    ]

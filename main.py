@@ -17,6 +17,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.message_components import File, Plain
 from astrbot.api.star import Context, Star, register
+from astrbot.api.util import SessionController, session_waiter
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.sources.telegram.tg_event import (
@@ -50,12 +51,19 @@ MICROSOFT_OUTLOOK_SCOPE = (
 )
 OWNER_ID_FALLBACK = "default"
 MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
+ADD_SESSION_TIMEOUT = 300
+SUPPORTED_ADD_PROVIDERS = {"gmail", "outlook", "qq"}
+SKIP_VALUES = {"-", "skip", "default", "默认", "跳过", "否", "no", "n"}
+CANCEL_VALUES = {"cancel", "取消", "退出", "exit", "quit"}
 
 
 def parse_mail_command_args(raw: str) -> list[str]:
     text = (raw or "").strip()
     if not text:
         return []
+    json_add = re.match(r"^(?:(?:/?mail(?:@\S+)?)\s+)?add\s+(\{.*)$", text, re.IGNORECASE | re.DOTALL)
+    if json_add:
+        return ["add", json_add.group(1).strip()]
     try:
         parts = shlex.split(text)
     except ValueError:
@@ -63,6 +71,104 @@ def parse_mail_command_args(raw: str) -> list[str]:
     if parts and MAIL_COMMAND_RE.match(parts[0]):
         return parts[1:]
     return parts
+
+
+def _normalize_mail_provider(value: str) -> str:
+    provider = str(value or "").strip().lower()
+    aliases = {
+        "google": "gmail",
+        "googlemail": "gmail",
+        "outlook.com": "outlook",
+        "hotmail": "outlook",
+        "microsoft": "outlook",
+        "ms": "outlook",
+        "腾讯": "qq",
+        "qqmail": "qq",
+    }
+    provider = aliases.get(provider, provider)
+    return provider if provider in SUPPORTED_ADD_PROVIDERS else ""
+
+
+def _is_cancel_text(value: str) -> bool:
+    return str(value or "").strip().lower() in CANCEL_VALUES
+
+
+def _is_skip_text(value: str) -> bool:
+    return str(value or "").strip().lower() in SKIP_VALUES
+
+
+def _default_account_id(provider: str, email: str) -> str:
+    local = email.split("@", 1)[0] if "@" in email else email
+    suffix = re.sub(r"[^A-Za-z0-9_.-]+", "-", local).strip(".-_")
+    return f"{provider}-{suffix or 'mail'}"
+
+
+def _build_provider_account_config(
+    *,
+    provider: str,
+    email: str,
+    password: str = "",
+    account_id: str = "",
+    display_name: str = "",
+    target_chat_id: str = "",
+    platform_id: str = "telegram",
+    message_type: str = "friend",
+    oauth2_client_id: str = "",
+    oauth2_client_secret: str = "",
+) -> dict[str, Any]:
+    provider = _normalize_mail_provider(provider)
+    if not provider:
+        raise ValueError("不支持的邮箱类型")
+    email = email.strip()
+    account_id = (account_id or _default_account_id(provider, email)).strip()
+    base: dict[str, Any] = {
+        "account_id": account_id,
+        "display_name": display_name.strip() or account_id,
+        "provider": provider,
+        "enabled": True,
+        "target_chat_id": target_chat_id.strip(),
+        "platform_id": platform_id.strip() or "telegram",
+        "message_type": message_type.strip() or "friend",
+        "imap_user": email,
+        "imap_folders": ["INBOX"],
+        "smtp_user": email,
+        "from_address": email,
+    }
+    if provider == "gmail":
+        base.update(
+            {
+                "imap_host": "imap.gmail.com",
+                "imap_port": 993,
+                "imap_tls": True,
+                "imap_password": password,
+                "smtp_host": "smtp.gmail.com",
+                "smtp_port": 465,
+                "smtp_tls": "ssl",
+                "smtp_password": password,
+                "archive_folder": "[Gmail]/All Mail",
+                "trash_folder": "[Gmail]/Trash",
+            }
+        )
+    elif provider == "qq":
+        base.update(
+            {
+                "imap_host": "imap.qq.com",
+                "imap_port": 993,
+                "imap_tls": True,
+                "imap_password": password,
+                "smtp_host": "smtp.qq.com",
+                "smtp_port": 465,
+                "smtp_tls": "ssl",
+                "smtp_password": password,
+            }
+        )
+    else:
+        base["auth_type"] = "oauth2"
+        if oauth2_client_id.strip():
+            base["oauth2_client_id"] = oauth2_client_id.strip()
+        if oauth2_client_secret.strip():
+            base["oauth2_client_secret"] = oauth2_client_secret.strip()
+    return base
 
 
 def _message_chain_result(chain: MessageChain) -> MessageEventResult:
@@ -78,7 +184,7 @@ def _message_chain_result(chain: MessageChain) -> MessageEventResult:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.1",
+    "0.1.2",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -143,7 +249,8 @@ class TelegramMailPlugin(Star):
             elif command == "oauth":
                 yield event.plain_result(await self._cmd_oauth(args[1:], owner_id))
             elif command == "add":
-                yield event.plain_result(self._cmd_add(args[1:], owner_id))
+                async for result in self._cmd_add(event, args[1:], owner_id, raw):
+                    yield result
             elif command == "remove":
                 yield event.plain_result(self._cmd_remove(args[1:], owner_id))
             elif command == "blocklist":
@@ -731,21 +838,216 @@ class TelegramMailPlugin(Star):
         )
         await self.context.send_message(session, MessageChain([Plain(text)]))
 
-    def _cmd_add(self, args: list[str], owner_id: str) -> str:
-        raw = " ".join(args).strip()
-        if not raw:
-            return "用法: /mail add <账号JSON>"
-        try:
-            account_config = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            return f"账号 JSON 无效: {exc}"
-        if not isinstance(account_config, dict):
-            return "账号 JSON 必须是对象。"
+    async def _cmd_add(
+        self,
+        event: AstrMessageEvent,
+        args: list[str],
+        owner_id: str,
+        raw: str,
+    ):
+        json_text = args[0].strip() if args and args[0].strip().startswith("{") else ""
+        if not json_text and raw:
+            match = re.match(
+                r"^(?:(?:/?mail(?:@\S+)?)\s+)?add\s+(\{.*)$",
+                raw.strip(),
+                re.IGNORECASE | re.DOTALL,
+            )
+            json_text = match.group(1).strip() if match else ""
+        if json_text:
+            try:
+                account_config = json.loads(json_text)
+            except json.JSONDecodeError as exc:
+                yield event.plain_result(f"账号 JSON 无效: {exc}")
+                return
+            if not isinstance(account_config, dict):
+                yield event.plain_result("账号 JSON 必须是对象。")
+                return
+            account = self._parse_account(account_config, owner_id)
+            self.store.set_account_config(owner_id, account.account_id, account_config)
+            self.store.save()
+            yield event.plain_result(
+                f"已保存账号 {account.account_id}。重启插件后会开始后台监听；也可以先执行 /mail check {account.account_id}。"
+            )
+            return
 
-        account = self._parse_account(account_config, owner_id)
-        self.store.set_account_config(owner_id, account.account_id, account_config)
-        self.store.save()
-        return f"已保存账号 {account.account_id}。重启插件后会开始后台监听；也可以先执行 /mail check {account.account_id}。"
+        yield event.plain_result(
+            "请按顺序回复邮箱类型、账号、密码及可选 client 信息。\n"
+            "支持类型: gmail / outlook / qq\n"
+            "回复「取消」可退出。"
+        )
+
+        @session_waiter(timeout=ADD_SESSION_TIMEOUT)
+        async def wait_for_add(
+            controller: SessionController,
+            reply_event: AstrMessageEvent,
+        ) -> None:
+            reply_text = (reply_event.message_str or "").strip()
+            normalized = reply_text.lower()
+
+            if _is_cancel_text(normalized):
+                await reply_event.send(reply_event.plain_result("已取消添加账号。"))
+                controller.stop()
+                return
+
+            if not controller.current_event:
+                return
+
+            state = getattr(controller, "mail_add_state", None)
+            if state is None:
+                state = {
+                    "step": "provider",
+                    "provider": "",
+                    "email": "",
+                    "password": "",
+                    "account_id": "",
+                    "display_name": "",
+                    "target_chat_id": owner_id,
+                    "platform_id": "telegram",
+                    "message_type": "friend",
+                    "oauth2_client_id": "",
+                    "oauth2_client_secret": "",
+                }
+                setattr(controller, "mail_add_state", state)
+
+            async def ask_next(prompt: str) -> None:
+                await reply_event.send(reply_event.plain_result(prompt))
+
+            step = str(state.get("step") or "provider")
+            provider = _normalize_mail_provider(state.get("provider", ""))
+
+            if step == "provider":
+                provider = _normalize_mail_provider(reply_text)
+                if not provider:
+                    await ask_next("请选择邮箱类型: gmail / outlook / qq")
+                    return
+                state["provider"] = provider
+                state["step"] = "email"
+                prompt = {
+                    "gmail": "请输入 Gmail 账号邮箱地址",
+                    "qq": "请输入 QQ 邮箱地址",
+                    "outlook": "请输入 Microsoft 账号邮箱地址",
+                }[provider]
+                await ask_next(prompt)
+                return
+
+            if step == "email":
+                if "@" not in reply_text:
+                    await ask_next("请输入有效的邮箱地址。")
+                    return
+                state["email"] = reply_text
+                if provider == "outlook":
+                    state["step"] = "outlook_client_choice"
+                    await ask_next(
+                        "是否自定义 Microsoft client 信息？回复 yes/no。默认使用插件设置中的 client。"
+                    )
+                else:
+                    state["step"] = "password"
+                    await ask_next("请输入邮箱密码或应用专用密码")
+                return
+
+            if step == "outlook_client_choice":
+                if normalized in {"yes", "y", "是", "需要", "自定义"}:
+                    state["step"] = "outlook_client_id"
+                    await ask_next("请输入 oauth2_client_id")
+                    return
+                if normalized in {"no", "n", "否", "默认", "不自定义"}:
+                    state["step"] = "account_id"
+                    await ask_next("请输入账号 ID，回复 - 则自动生成")
+                    return
+                await ask_next("请回复 yes 或 no。")
+                return
+
+            if step == "outlook_client_id":
+                state["oauth2_client_id"] = reply_text
+                state["step"] = "outlook_client_secret"
+                await ask_next("请输入 oauth2_client_secret；如果没有就回复 -")
+                return
+
+            if step == "outlook_client_secret":
+                state["oauth2_client_secret"] = "" if _is_skip_text(reply_text) else reply_text
+                state["step"] = "account_id"
+                await ask_next("请输入账号 ID，回复 - 则自动生成")
+                return
+
+            if step == "password":
+                state["password"] = "" if _is_skip_text(reply_text) else reply_text
+                state["step"] = "target_chat_id"
+                await ask_next(
+                    "请输入目标会话 ID（Telegram chat_id；群聊可用负数，话题群可用 chat_id#thread_id）"
+                )
+                return
+
+            if step == "account_id":
+                state["account_id"] = "" if _is_skip_text(reply_text) else reply_text
+                state["step"] = "target_chat_id"
+                await ask_next(
+                    "请输入目标会话 ID（Telegram chat_id；群聊可用负数，话题群可用 chat_id#thread_id）"
+                )
+                return
+
+            if step == "target_chat_id":
+                state["target_chat_id"] = reply_text
+                state["step"] = "confirm"
+                provider_account = _build_provider_account_config(
+                    provider=str(state.get("provider") or ""),
+                    email=str(state.get("email") or ""),
+                    password=str(state.get("password") or ""),
+                    account_id=str(state.get("account_id") or ""),
+                    display_name=str(state.get("display_name") or ""),
+                    target_chat_id=str(state.get("target_chat_id") or ""),
+                    platform_id=str(state.get("platform_id") or "telegram"),
+                    message_type=str(state.get("message_type") or "friend"),
+                    oauth2_client_id=str(state.get("oauth2_client_id") or ""),
+                    oauth2_client_secret=str(state.get("oauth2_client_secret") or ""),
+                )
+                state["pending_config"] = provider_account
+                summary_lines = [
+                    "请确认账号配置:",
+                    f"- 类型: {provider_account.get('provider')}",
+                    f"- 账号: {provider_account.get('imap_user')}",
+                    f"- 账号ID: {provider_account.get('account_id')}",
+                    f"- 目标会话: {provider_account.get('target_chat_id')}",
+                    f"- 认证方式: {provider_account.get('auth_type') or 'password'}",
+                    "回复 yes 保存，回复 no 取消。",
+                ]
+                await ask_next("\n".join(summary_lines))
+                return
+
+            if step == "confirm":
+                if normalized in {"yes", "y", "是", "确认", "ok"}:
+                    pending = state.get("pending_config")
+                    if not isinstance(pending, dict):
+                        await reply_event.send(reply_event.plain_result("账号配置丢失，请重新添加。"))
+                        controller.stop()
+                        return
+                    try:
+                        account = self._parse_account(pending, owner_id)
+                    except Exception as exc:
+                        await reply_event.send(reply_event.plain_result(f"账号配置无效: {exc}"))
+                        controller.stop()
+                        return
+                    self.store.set_account_config(owner_id, account.account_id, pending)
+                    self.store.save()
+                    await reply_event.send(
+                        reply_event.plain_result(
+                            f"已保存账号 {account.account_id}。重启插件后会开始后台监听；也可以先执行 /mail check {account.account_id}。"
+                        )
+                    )
+                    controller.stop()
+                    return
+                if normalized in {"no", "n", "否", "取消", "exit"}:
+                    await reply_event.send(reply_event.plain_result("已取消添加账号。"))
+                    controller.stop()
+                    return
+                await ask_next("请回复 yes 保存，或 no 取消。")
+                return
+
+            await ask_next("当前状态已失效，请重新执行 /mail add。")
+
+        try:
+            await wait_for_add(event)
+        except TimeoutError:
+            yield event.plain_result("⏰ 等待超时，添加账号已取消。")
 
     def _cmd_remove(self, args: list[str], owner_id: str) -> str:
         if len(args) != 1:
@@ -1053,8 +1355,14 @@ class TelegramMailPlugin(Star):
                 or oauth2_state.get("refresh_token")
                 or ""
             ),
-            oauth2_client_id=str(item.get("oauth2_client_id") or ""),
-            oauth2_client_secret=str(item.get("oauth2_client_secret") or ""),
+            oauth2_client_id=str(
+                item.get("oauth2_client_id")
+                or self._config_str("oauth2_client_id", "")
+            ),
+            oauth2_client_secret=str(
+                item.get("oauth2_client_secret")
+                or self._config_str("oauth2_client_secret", "")
+            ),
             oauth2_token_url=str(
                 item.get("oauth2_token_url")
                 or MICROSOFT_TOKEN_URL
@@ -1208,6 +1516,10 @@ class TelegramMailPlugin(Star):
             return value.lower() in {"1", "true", "yes", "on"}
         return bool(value)
 
+    def _config_str(self, key: str, default: str) -> str:
+        value = self.config.get(key, default)
+        return default if value is None else str(value)
+
     @staticmethod
     def _item_bool(item: dict[str, Any], key: str, default: bool) -> bool:
         if key not in item:
@@ -1225,9 +1537,11 @@ class TelegramMailPlugin(Star):
             "Telegram Mail 命令:\n"
             "/mail status\n"
             "/mail check [account_id]\n"
+            "/mail add\n"
             "/mail send <account_id> <to> | <subject> | <body>\n"
             "/mail reply <token> <body>\n"
             "/mail oauth <account_id>\n"
+            "/mail remove <account_id>\n"
             "/mail blocklist [account_id]\n"
             "/mail unblock <account_id> <sender-or-domain>"
         )
