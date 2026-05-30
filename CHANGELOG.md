@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5
+
+- Filtered common HTML/CSS boilerplate from mail body previews and full-text view so the actual message content appears first.
+
 ## 0.1.4
 
 - Removed `client_secret` from Outlook public-client device code and refresh token requests.

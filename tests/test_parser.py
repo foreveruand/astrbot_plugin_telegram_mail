@@ -48,3 +48,47 @@ def test_html_to_text_strips_markup():
         "World !",
     ]
 
+
+def test_html_to_text_drops_style_noise_and_boilerplate():
+    text = html_to_text(
+        """
+        <html>
+          <head>
+            <style>
+              #outlook a { padding:0; }
+              body { margin:0;padding:0; }
+            </style>
+          </head>
+          <body>
+            Subject: gojo8在Domain Patreaction 中提及了您
+            Date: 2026-05-30 00:23
+            Attachments: 0
+
+            <p>有效内容</p>
+          </body>
+        </html>
+        """
+    )
+
+    assert text == "有效内容"
+
+
+def test_parse_message_uses_cleaned_html_body_text():
+    raw = (
+        "From: Sender <sender@example.com>\r\n"
+        "To: User <user@example.com>\r\n"
+        "Subject: Test mail\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "\r\n"
+        "<html><head><style>#outlook a { padding:0; }</style></head><body>"
+        "Subject: gojo8在Domain Patreaction 中提及了您\r\n"
+        "Date: 2026-05-30 00:23\r\n"
+        "Attachments: 0\r\n"
+        "<div>有效内容</div>"
+        "</body></html>\r\n"
+    ).encode()
+
+    parsed = parse_message(raw, account_id="a1", folder="INBOX", uid="8")
+
+    assert parsed.body_text == "有效内容"

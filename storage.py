@@ -63,7 +63,9 @@ class JsonStore:
         self, owner_id: str, account_id: str, folder: str, uids: set[str]
     ) -> None:
         account_seen = (
-            self._user_bucket(owner_id).setdefault("seen", {}).setdefault(account_id, {})
+            self._user_bucket(owner_id)
+            .setdefault("seen", {})
+            .setdefault(account_id, {})
         )
         account_seen[folder] = sorted(uids, key=_uid_sort_key)
 
@@ -112,7 +114,9 @@ class JsonStore:
         if not sender:
             return
         blocked = (
-            self._user_bucket(owner_id).setdefault("blocked", {}).setdefault(account_id, [])
+            self._user_bucket(owner_id)
+            .setdefault("blocked", {})
+            .setdefault(account_id, [])
         )
         if sender not in blocked:
             blocked.append(sender)
@@ -121,7 +125,9 @@ class JsonStore:
     def unblock_sender(self, owner_id: str, account_id: str, sender: str) -> bool:
         sender = sender.lower().strip()
         blocked = (
-            self._user_bucket(owner_id).setdefault("blocked", {}).setdefault(account_id, [])
+            self._user_bucket(owner_id)
+            .setdefault("blocked", {})
+            .setdefault(account_id, [])
         )
         if sender not in blocked:
             return False
@@ -142,7 +148,9 @@ class JsonStore:
         return sender_email in blocked or domain in blocked or f"@{domain}" in blocked
 
     def set_last_error(self, owner_id: str, account_id: str, error: str) -> None:
-        self._user_bucket(owner_id).setdefault("last_errors", {})[account_id] = error[:500]
+        self._user_bucket(owner_id).setdefault("last_errors", {})[account_id] = error[
+            :500
+        ]
 
     def clear_last_error(self, owner_id: str, account_id: str) -> None:
         self._user_bucket(owner_id).setdefault("last_errors", {}).pop(account_id, None)
@@ -152,12 +160,16 @@ class JsonStore:
 
     def last_error(self, owner_id: str, account_id: str) -> str:
         return str(
-            self._user_bucket(owner_id).setdefault("last_errors", {}).get(account_id, "")
+            self._user_bucket(owner_id)
+            .setdefault("last_errors", {})
+            .get(account_id, "")
         )
 
     def last_check(self, owner_id: str, account_id: str) -> str:
         return str(
-            self._user_bucket(owner_id).setdefault("last_checks", {}).get(account_id, "")
+            self._user_bucket(owner_id)
+            .setdefault("last_checks", {})
+            .get(account_id, "")
         )
 
     def _trim_tokens(self, owner_id: str) -> None:
@@ -169,7 +181,9 @@ class JsonStore:
             tokens.pop(token, None)
 
     def get_oauth2_state(self, owner_id: str, account_id: str) -> dict[str, Any]:
-        payload = self._user_bucket(owner_id).setdefault("oauth2", {}).get(account_id, {})
+        payload = (
+            self._user_bucket(owner_id).setdefault("oauth2", {}).get(account_id, {})
+        )
         return payload if isinstance(payload, dict) else {}
 
     def set_oauth2_state(

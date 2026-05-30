@@ -11,7 +11,14 @@ from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from .models import MailAttachment, ParsedMail
 
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+HTML_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+HTML_STYLE_BLOCK_RE = re.compile(r"(?is)<(script|style)\b[^>]*>.*?</\1>")
 WHITESPACE_RE = re.compile(r"[ \t\r\f\v]+")
+LEADING_BOILERPLATE_RE = re.compile(
+    r"^(?:subject|date|attachments?)\s*:\s*.*$",
+    re.IGNORECASE,
+)
+CSS_LINE_RE = re.compile(r"^[^{}]*\{[^{}]*\}\s*$")
 UNSUBSCRIBE_ANCHOR_RE = re.compile(
     r"<a\b[^>]+href=[\"']([^\"']+)[\"'][^>]*>[^<]*(?:unsubscribe|退订|取消订阅)[^<]*</a>",
     re.IGNORECASE,
@@ -59,11 +66,14 @@ def decode_mime_header(value: str) -> str:
 def html_to_text(value: str) -> str:
     if not value:
         return ""
+    value = HTML_STYLE_BLOCK_RE.sub(" ", value)
+    value = HTML_COMMENT_RE.sub(" ", value)
     value = re.sub(r"(?i)<br\s*/?>", "\n", value)
     value = re.sub(r"(?i)</p\s*>", "\n\n", value)
     value = HTML_TAG_RE.sub(" ", value)
     value = html.unescape(value).replace("\xa0", " ")
     lines = [WHITESPACE_RE.sub(" ", line).strip() for line in value.splitlines()]
+    lines = _strip_leading_boilerplate(lines)
     return "\n".join(line for line in lines if line).strip()
 
 
@@ -178,3 +188,27 @@ def _dedupe(values: list[str]) -> list[str]:
         seen.add(key)
         result.append(value)
     return result
+
+
+def _strip_leading_boilerplate(lines: list[str]) -> list[str]:
+    start = 0
+    noise_count = 0
+    saw_css = False
+    while start < len(lines):
+        line = lines[start].strip()
+        if not line:
+            start += 1
+            continue
+        if LEADING_BOILERPLATE_RE.match(line):
+            noise_count += 1
+            start += 1
+            continue
+        if CSS_LINE_RE.match(line):
+            noise_count += 1
+            saw_css = True
+            start += 1
+            continue
+        break
+    if saw_css or noise_count >= 2:
+        return lines[start:]
+    return lines

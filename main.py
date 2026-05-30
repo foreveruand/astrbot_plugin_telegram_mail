@@ -61,7 +61,9 @@ def parse_mail_command_args(raw: str) -> list[str]:
     text = (raw or "").strip()
     if not text:
         return []
-    json_add = re.match(r"^(?:(?:/?mail(?:@\S+)?)\s+)?add\s+(\{.*)$", text, re.IGNORECASE | re.DOTALL)
+    json_add = re.match(
+        r"^(?:(?:/?mail(?:@\S+)?)\s+)?add\s+(\{.*)$", text, re.IGNORECASE | re.DOTALL
+    )
     if json_add:
         return ["add", json_add.group(1).strip()]
     try:
@@ -304,7 +306,9 @@ class TelegramMailPlugin(Star):
                 raise
             except Exception as exc:
                 logger.exception("Mail poll failed for account %s", account.account_id)
-                self.store.set_last_error(account.owner_id, account.account_id, str(exc))
+                self.store.set_last_error(
+                    account.owner_id, account.account_id, str(exc)
+                )
                 self.store.save()
 
             await self._sleep_poll_interval(account)
@@ -347,7 +351,9 @@ class TelegramMailPlugin(Star):
                         account.account_id,
                         folder,
                     )
-                    self.store.set_last_error(account.owner_id, account.account_id, str(exc))
+                    self.store.set_last_error(
+                        account.owner_id, account.account_id, str(exc)
+                    )
                     self.store.save()
                 await self._sleep_poll_interval(account)
             except Exception as exc:
@@ -357,7 +363,9 @@ class TelegramMailPlugin(Star):
                     folder,
                 )
                 self._set_folder_mode(account, folder, "polling fallback")
-                self.store.set_last_error(account.owner_id, account.account_id, str(exc))
+                self.store.set_last_error(
+                    account.owner_id, account.account_id, str(exc)
+                )
                 self.store.save()
                 await self._sleep_poll_interval(account)
 
@@ -370,7 +378,9 @@ class TelegramMailPlugin(Star):
         except asyncio.TimeoutError:
             pass
 
-    async def _check_now(self, account_id: str = "", owner_id: str | None = None) -> int:
+    async def _check_now(
+        self, account_id: str = "", owner_id: str | None = None
+    ) -> int:
         accounts = self._accounts()
         if owner_id is not None:
             accounts = [account for account in accounts if account.owner_id == owner_id]
@@ -406,7 +416,9 @@ class TelegramMailPlugin(Star):
         if not self.store.is_initialized(account.owner_id, account.account_id, folder):
             self.store.set_initialized(account.owner_id, account.account_id, folder)
             if not self._config_bool("notify_existing_on_first_run", False):
-                self.store.set_seen(account.owner_id, account.account_id, folder, current)
+                self.store.set_seen(
+                    account.owner_id, account.account_id, folder, current
+                )
                 self._mark_account_checked(account)
                 return 0
 
@@ -467,7 +479,7 @@ class TelegramMailPlugin(Star):
                 "subject": parsed.subject,
                 "message_id": parsed.message_id,
                 "recipients": parsed.recipients,
-            }
+            },
         )
         self.store.save()
         chain = self._mail_card(account, parsed, token)
@@ -533,7 +545,9 @@ class TelegramMailPlugin(Star):
             await event.answer_callback_query()
             return
         if op == "block":
-            self.store.block_sender(account.owner_id, account.account_id, parsed.sender_email)
+            self.store.block_sender(
+                account.owner_id, account.account_id, parsed.sender_email
+            )
             self.store.save()
             event.set_result(
                 _message_chain_result(
@@ -628,7 +642,9 @@ class TelegramMailPlugin(Star):
         chat_id = self._callback_chat_id(event)
         await TelegramPlatformEvent.send_with_client(event.client, chain, chat_id)
 
-    async def _cmd_send(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
+    async def _cmd_send(
+        self, args: list[str], owner_id: str = OWNER_ID_FALLBACK
+    ) -> str:
         if len(args) < 2:
             return "用法: /mail send <account_id> <to> | <subject> | <body>"
         account = self._account(args[0], owner_id)
@@ -647,7 +663,9 @@ class TelegramMailPlugin(Star):
         )
         return f"已发送至 {', '.join(recipients)}"
 
-    async def _cmd_reply(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
+    async def _cmd_reply(
+        self, args: list[str], owner_id: str = OWNER_ID_FALLBACK
+    ) -> str:
         if len(args) < 2:
             return "用法: /mail reply <token> <回复内容>"
         token = args[0]
@@ -682,7 +700,9 @@ class TelegramMailPlugin(Star):
         )
         return f"已回复 {parsed.sender_email}"
 
-    async def _cmd_oauth(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
+    async def _cmd_oauth(
+        self, args: list[str], owner_id: str = OWNER_ID_FALLBACK
+    ) -> str:
         if len(args) != 1:
             return "用法: /mail oauth <account_id>"
         account = self._account(args[0], owner_id)
@@ -755,9 +775,13 @@ class TelegramMailPlugin(Star):
             )
             return
 
-        await self._send_account_notice(account, f"OAuth2 授权超时: {account.display_name}")
+        await self._send_account_notice(
+            account, f"OAuth2 授权超时: {account.display_name}"
+        )
 
-    def _poll_device_token(self, account: MailAccount, device_code: str) -> dict[str, Any]:
+    def _poll_device_token(
+        self, account: MailAccount, device_code: str
+    ) -> dict[str, Any]:
         return self._post_oauth2_form(
             account.oauth2_token_url,
             {
@@ -1013,13 +1037,17 @@ class TelegramMailPlugin(Star):
                 if normalized in {"yes", "y", "是", "确认", "ok"}:
                     pending = state.get("pending_config")
                     if not isinstance(pending, dict):
-                        await reply_event.send(reply_event.plain_result("账号配置丢失，请重新添加。"))
+                        await reply_event.send(
+                            reply_event.plain_result("账号配置丢失，请重新添加。")
+                        )
                         controller.stop()
                         return
                     try:
                         account = self._parse_account(pending, owner_id)
                     except Exception as exc:
-                        await reply_event.send(reply_event.plain_result(f"账号配置无效: {exc}"))
+                        await reply_event.send(
+                            reply_event.plain_result(f"账号配置无效: {exc}")
+                        )
                         controller.stop()
                         return
                     self.store.set_account_config(owner_id, account.account_id, pending)
@@ -1052,9 +1080,7 @@ class TelegramMailPlugin(Star):
         self.store.save()
         return "已删除账号。" if removed else "未找到该账号。"
 
-    def _cmd_unblock(
-        self, args: list[str], owner_id: str = OWNER_ID_FALLBACK
-    ) -> str:
+    def _cmd_unblock(self, args: list[str], owner_id: str = OWNER_ID_FALLBACK) -> str:
         if len(args) != 2:
             return "用法: /mail unblock <account_id> <sender-or-domain>"
         account_id, sender = args
@@ -1212,7 +1238,9 @@ class TelegramMailPlugin(Star):
         return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
 
     def _render_status(self, owner_id: str = OWNER_ID_FALLBACK) -> str:
-        accounts = [account for account in self._accounts() if account.owner_id == owner_id]
+        accounts = [
+            account for account in self._accounts() if account.owner_id == owner_id
+        ]
         if not accounts:
             return "未配置邮箱账号。"
         lines = ["Telegram Mail 状态"]
@@ -1222,7 +1250,9 @@ class TelegramMailPlugin(Star):
             last_check = self.store.last_check(owner_id, account.account_id) or "-"
             last_error = self.store.last_error(owner_id, account.account_id)
             oauth2_state = self.store.get_oauth2_state(owner_id, account.account_id)
-            oauth2_status = "authorized" if oauth2_state.get("access_token") else "unauthorized"
+            oauth2_status = (
+                "authorized" if oauth2_state.get("access_token") else "unauthorized"
+            )
             lines.append(
                 f"- {account.account_id} ({account.display_name}): {status}, "
                 f"mode={mode}, oauth2={oauth2_status}, last_check={last_check}, target={account.target_chat_id}"
@@ -1341,10 +1371,14 @@ class TelegramMailPlugin(Star):
             smtp_user=smtp_user,
             smtp_password=str(item.get("smtp_password") or item.get("password") or ""),
             smtp_auth_type=smtp_auth_type,
-            smtp_tls=str(item.get("smtp_tls") or ("starttls" if is_outlook else "ssl")).lower(),
+            smtp_tls=str(
+                item.get("smtp_tls") or ("starttls" if is_outlook else "ssl")
+            ).lower(),
             from_address=str(item.get("from_address") or smtp_user or imap_user),
             oauth2_access_token=str(
-                item.get("oauth2_access_token") or oauth2_state.get("access_token") or ""
+                item.get("oauth2_access_token")
+                or oauth2_state.get("access_token")
+                or ""
             ),
             oauth2_refresh_token=str(
                 item.get("oauth2_refresh_token")
@@ -1352,25 +1386,17 @@ class TelegramMailPlugin(Star):
                 or ""
             ),
             oauth2_client_id=str(
-                item.get("oauth2_client_id")
-                or self._config_str("oauth2_client_id", "")
+                item.get("oauth2_client_id") or self._config_str("oauth2_client_id", "")
             ),
             oauth2_client_secret=str(
                 item.get("oauth2_client_secret")
                 or self._config_str("oauth2_client_secret", "")
             ),
-            oauth2_token_url=str(
-                item.get("oauth2_token_url")
-                or MICROSOFT_TOKEN_URL
-            ),
+            oauth2_token_url=str(item.get("oauth2_token_url") or MICROSOFT_TOKEN_URL),
             oauth2_device_code_url=str(
-                item.get("oauth2_device_code_url")
-                or MICROSOFT_DEVICE_CODE_URL
+                item.get("oauth2_device_code_url") or MICROSOFT_DEVICE_CODE_URL
             ),
-            oauth2_scope=str(
-                item.get("oauth2_scope")
-                or MICROSOFT_OUTLOOK_SCOPE
-            ),
+            oauth2_scope=str(item.get("oauth2_scope") or MICROSOFT_OUTLOOK_SCOPE),
             oauth2_expires_at=float(
                 item.get("oauth2_expires_at") or oauth2_state.get("expires_at") or 0
             ),
@@ -1451,7 +1477,9 @@ class TelegramMailPlugin(Star):
         if not account.realtime_enabled:
             return "polling"
         modes = {
-            self.folder_modes.get((self._account_state_key(account), folder), "starting")
+            self.folder_modes.get(
+                (self._account_state_key(account), folder), "starting"
+            )
             for folder in account.imap_folders
         }
         if "polling fallback" in modes:
