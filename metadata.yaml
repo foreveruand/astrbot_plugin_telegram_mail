@@ -1,6 +1,6 @@
 name: astrbot_plugin_telegram_mail
 display_name: Telegram 邮箱助手
 desc: 专用于 Telegram 的 IMAP/SMTP 邮箱插件，支持多账号收信推送、附件按钮、全文翻页和邮件操作。
-version: 0.1.5
+version: 0.1.6
 author: foreveruand
 repo: "https://github.com/foreveruand/astrbot_plugin_telegram_mail"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- Disabled Telegram web page previews when editing mail callback messages to avoid URL preview truncation issues.
+
 ## 0.1.5
 
 - Filtered common HTML/CSS boilerplate from mail body previews and full-text view so the actual message content appears first.

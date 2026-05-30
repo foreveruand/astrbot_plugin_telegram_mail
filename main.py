@@ -182,11 +182,55 @@ def _message_chain_result(chain: MessageChain) -> MessageEventResult:
     return result
 
 
+def _patch_telegram_callback_edit_message_preview() -> None:
+    if getattr(
+        TelegramCallbackQueryEvent, "_mail_disable_web_page_preview_patched", False
+    ):
+        return
+
+    async def _edit_message(
+        self: TelegramCallbackQueryEvent,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup=None,
+    ) -> None:
+        if self.inline_message_id:
+            try:
+                await self.client.edit_message_text(
+                    text=text[: TelegramPlatformEvent.MAX_MESSAGE_LENGTH],
+                    inline_message_id=self.inline_message_id,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning(f"编辑内联消息失败: {e!s}")
+        elif self.message:
+            try:
+                chat_id = self.message.chat.id
+                message_id = self.message.message_id
+                await self.client.edit_message_text(
+                    text=text[: TelegramPlatformEvent.MAX_MESSAGE_LENGTH],
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    parse_mode=parse_mode,
+                    reply_markup=reply_markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                logger.warning(f"编辑消息失败: {e!s}")
+        else:
+            logger.debug("TelegramCallbackQueryEvent 无可用消息，跳过编辑。")
+
+    TelegramCallbackQueryEvent._edit_message = _edit_message  # type: ignore[assignment]
+    TelegramCallbackQueryEvent._mail_disable_web_page_preview_patched = True  # type: ignore[attr-defined]
+
+
 @register(
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.4",
+    "0.1.6",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -205,6 +249,7 @@ class TelegramMailPlugin(Star):
         self.folder_modes: dict[tuple[str, str], str] = {}
 
     async def initialize(self) -> None:
+        _patch_telegram_callback_edit_message_preview()
         self.store.load()
         accounts = self._accounts()
         for account in accounts:
