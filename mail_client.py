@@ -248,8 +248,6 @@ class MailClient:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         }
-        if account.oauth2_client_secret:
-            form["client_secret"] = account.oauth2_client_secret
         if account.oauth2_scope:
             form["scope"] = account.oauth2_scope
 

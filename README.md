@@ -12,7 +12,7 @@
 - `More` 按钮展示全文并支持 Prev/Next 翻页。
 - `Action` 按钮支持 Reply、Unsubscribe、Block Sender、Archive、Delete、Mark Read、Mark Unread。
 - SMTP 支持 `/mail send` 新建邮件和 `/mail reply` 回复邮件。
-- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 和 `oauth2_client_secret` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。
+- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。
 
 ## 配置
 
@@ -22,8 +22,7 @@
 
 ```json
 {
-  "oauth2_client_id": "your-app-client-id",
-  "oauth2_client_secret": "optional-app-secret"
+  "oauth2_client_id": "your-app-client-id"
 }
 ```
 
@@ -88,14 +87,13 @@ Outlook 示例：
   "imap_user": "your@outlook.com",
   "imap_folders": ["INBOX"],
   "smtp_user": "your@outlook.com",
-  "oauth2_client_id": "your-app-client-id",
-  "oauth2_client_secret": "optional-app-secret"
+  "oauth2_client_id": "your-app-client-id"
 }
 ```
 
 `provider: "outlook"` 会默认使用 Microsoft 文档中的 IMAP/SMTP 设置：IMAP `outlook.office365.com:993` SSL/TLS，SMTP `smtp-mail.outlook.com:587` STARTTLS，并默认启用 OAuth2。保存账号后执行 `/mail oauth outlook-main`，插件会返回 Microsoft 授权链接和一次性代码；用户授权完成后，access token / refresh token 会保存到插件数据目录的 `state.json` 用户分桶中，后续 access token 过期会用 refresh token 自动刷新。
 
-Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，需要重新执行 `/mail oauth <account_id>` 完成交互授权。
+Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
 
 插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
 
@@ -120,4 +118,4 @@ Microsoft access token 通常是短期有效，refresh token 因为请求了 `of
 - `Unsubscribe` 只展示退订链接或 mailto，不会自动请求外部链接。
 - `Block Sender` 是插件本地屏蔽，不会创建邮箱服务端规则。
 - 密码应使用邮箱服务商提供的应用专用密码。
-- 不要把邮箱密码或 OAuth token 写入插件设置；使用 `/mail add` 按用户保存。Microsoft OAuth client 可以放在插件设置里作为全局默认值。
+- 不要把邮箱密码或 OAuth token 写入插件设置；使用 `/mail add` 按用户保存。Microsoft OAuth client ID 可以放在插件设置里作为全局默认值。

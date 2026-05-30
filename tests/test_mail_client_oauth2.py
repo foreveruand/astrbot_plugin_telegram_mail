@@ -1,4 +1,5 @@
 import urllib.error
+import urllib.parse
 
 import pytest
 from astrbot_plugin_telegram_mail.mail_client import MailClient
@@ -173,6 +174,41 @@ def test_oauth2_access_token_prefers_stored_refresh_token(monkeypatch):
 
     assert client._oauth2_access_token(account) == "new-access"
     assert called[0]["access_token"] == "new-access"
+
+
+def test_oauth2_refresh_does_not_send_client_secret_for_public_client(monkeypatch):
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def read(self):
+            return b'{"access_token":"new-access","expires_in":3600}'
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.urllib.request.urlopen",
+        urlopen,
+    )
+
+    account = _account(
+        oauth2_access_token="",
+        oauth2_refresh_token="refresh-token",
+        oauth2_client_id="client-id",
+        oauth2_client_secret="should-not-be-sent",
+    )
+
+    assert MailClient()._oauth2_access_token(account) == "new-access"
+    body = urllib.parse.parse_qs(requests[0].data.decode("utf-8"))
+    assert body["client_id"] == ["client-id"]
+    assert "client_secret" not in body
 
 
 def test_oauth2_refresh_error_includes_microsoft_description(monkeypatch):

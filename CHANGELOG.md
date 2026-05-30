@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4
+
+- Removed `client_secret` from Outlook public-client device code and refresh token requests.
+- Simplified Outlook account setup to collect only `oauth2_client_id`.
+- Clarified that `AADSTS90023` means the public client flow is still sending a client secret.
+
 ## 0.1.3
 
 - Preserved the latest stored Outlook refresh token when Microsoft returns an access-token-only refresh response.

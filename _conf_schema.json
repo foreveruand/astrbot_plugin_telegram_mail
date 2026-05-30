@@ -60,9 +60,9 @@
         "hint": "Outlook/Microsoft 账号未单独配置 oauth2_client_id 时使用该默认值。"
     },
     "oauth2_client_secret": {
-        "description": "Microsoft OAuth Client Secret",
+        "description": "Microsoft OAuth Client Secret (unused for Outlook device code)",
         "type": "string",
         "default": "",
-        "hint": "可选。Outlook/Microsoft 账号未单独配置 oauth2_client_secret 时使用该默认值。"
+        "hint": "Outlook device code 属于 public client flow，插件不会发送 client_secret。保留该字段仅兼容旧配置。"
     }
 }

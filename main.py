@@ -184,7 +184,7 @@ def _message_chain_result(chain: MessageChain) -> MessageEventResult:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.3",
+    "0.1.4",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -765,7 +765,6 @@ class TelegramMailPlugin(Star):
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 "device_code": device_code,
             },
-            client_secret=account.oauth2_client_secret,
         )
 
     @staticmethod
@@ -910,7 +909,6 @@ class TelegramMailPlugin(Star):
                     "platform_id": "telegram",
                     "message_type": "friend",
                     "oauth2_client_id": "",
-                    "oauth2_client_secret": "",
                 }
                 setattr(controller, "mail_add_state", state)
 
@@ -943,7 +941,7 @@ class TelegramMailPlugin(Star):
                 if provider == "outlook":
                     state["step"] = "outlook_client_choice"
                     await ask_next(
-                        "是否自定义 Microsoft client 信息？回复 yes/no。默认使用插件设置中的 client。"
+                        "是否自定义 Microsoft client_id？回复 yes/no。默认使用插件设置中的 client_id。"
                     )
                 else:
                     state["step"] = "password"
@@ -964,12 +962,6 @@ class TelegramMailPlugin(Star):
 
             if step == "outlook_client_id":
                 state["oauth2_client_id"] = reply_text
-                state["step"] = "outlook_client_secret"
-                await ask_next("请输入 oauth2_client_secret；如果没有就回复 -")
-                return
-
-            if step == "outlook_client_secret":
-                state["oauth2_client_secret"] = "" if _is_skip_text(reply_text) else reply_text
                 state["step"] = "account_id"
                 await ask_next("请输入账号 ID，回复 - 则自动生成")
                 return
@@ -1003,7 +995,6 @@ class TelegramMailPlugin(Star):
                     platform_id=str(state.get("platform_id") or "telegram"),
                     message_type=str(state.get("message_type") or "friend"),
                     oauth2_client_id=str(state.get("oauth2_client_id") or ""),
-                    oauth2_client_secret=str(state.get("oauth2_client_secret") or ""),
                 )
                 state["pending_config"] = provider_account
                 summary_lines = [

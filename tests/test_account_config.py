@@ -201,3 +201,34 @@ def test_oauth2_token_save_keeps_current_stored_refresh_token():
     )
 
     assert states[("u1", "a1")]["refresh_token"] == "stored-refresh"
+
+
+def test_device_code_token_poll_does_not_send_client_secret(monkeypatch):
+    calls = []
+
+    def post_form(url, form, *, client_secret=""):
+        calls.append((url, form, client_secret))
+        return {"access_token": "access", "refresh_token": "refresh"}
+
+    monkeypatch.setattr(
+        TelegramMailPlugin,
+        "_post_oauth2_form",
+        staticmethod(post_form),
+    )
+    plugin = _plugin()
+    account = plugin._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+            oauth2_client_id="client-id",
+            oauth2_client_secret="should-not-be-sent",
+        ),
+        "u1",
+    )
+
+    plugin._poll_device_token(account, "device-code")
+
+    assert calls[0][1]["client_id"] == "client-id"
+    assert calls[0][1]["device_code"] == "device-code"
+    assert calls[0][2] == ""
