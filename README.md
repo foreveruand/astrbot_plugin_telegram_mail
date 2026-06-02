@@ -103,6 +103,14 @@ Microsoft access token 通常是短期有效，refresh token 因为请求了 `of
 
 `realtime_enabled` 默认开启。开启后插件会为每个 `imap_folders` 文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒。
 
+已有 `last_check` 的账号在检查新 UID 时会额外校验邮件头 `Date`。如果邮件 `Date` 早于上次检查时间超过 `historical_mail_grace_seconds` 秒，插件会把该 UID 标记为已处理但不推送，避免 IMAP 重连、UID 状态异常或服务端返回旧 UID 时刷出历史邮件。默认宽限为 86400 秒；如需更严格或更宽松，可在插件设置中调整：
+
+```json
+{
+  "historical_mail_grace_seconds": 86400
+}
+```
+
 ## 命令
 
 - `/mail status` 查看账号状态。

@@ -1,8 +1,9 @@
+import imaplib
 import pytest
 import threading
 
 from astrbot_plugin_telegram_mail import mail_client
-from astrbot_plugin_telegram_mail.mail_client import MailClient
+from astrbot_plugin_telegram_mail.mail_client import MailClient, MailIdleDisconnected
 
 
 class FakeSocket:
@@ -105,3 +106,24 @@ def test_idle_wait_raises_when_server_rejects_idle():
 
     with pytest.raises(RuntimeError, match="Failed to enter IMAP IDLE"):
         MailClient._idle_wait(client, 10)
+
+
+def test_idle_wait_reports_disconnect_without_leaking_done_broken_pipe(monkeypatch):
+    class DisconnectingImap(FakeImap):
+        def send(self, data):
+            self.sent.append(data)
+            if data == b"DONE\r\n":
+                raise BrokenPipeError("broken pipe")
+
+        def _get_line(self):
+            if self.lines:
+                return self.lines.pop(0)
+            raise imaplib.IMAP4.abort("socket error: EOF")
+
+    client = DisconnectingImap([b"+ idling"])
+    monkeypatch.setattr(mail_client.select, "select", lambda r, w, x, t: (r, [], []))
+
+    with pytest.raises(MailIdleDisconnected):
+        MailClient._idle_wait(client, 10)
+
+    assert client.sent == [b"A0 IDLE\r\n", b"DONE\r\n"]

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.7
+
+- Treated IMAP IDLE socket EOF/BrokenPipe as recoverable disconnects to avoid repeated traceback logs.
+- Added a Date-based historical mail guard so unexpectedly unseen old UIDs are marked processed without being pushed.
+- Added `historical_mail_grace_seconds` to configure the Date guard grace window.
+
 ## 0.1.6
 
 - Disabled Telegram web page previews when editing mail callback messages to avoid URL preview truncation issues.

@@ -21,6 +21,19 @@ class IdleNotSupported(RuntimeError):
     pass
 
 
+class MailIdleDisconnected(RuntimeError):
+    pass
+
+
+_IDLE_DISCONNECT_ERRORS = (
+    imaplib.IMAP4.abort,
+    BrokenPipeError,
+    ConnectionError,
+    OSError,
+    TimeoutError,
+)
+
+
 class MailClient:
     def __init__(
         self,
@@ -334,12 +347,16 @@ class MailClient:
                     return True
                 if line.startswith(tag + b" "):
                     return False
+        except _IDLE_DISCONNECT_ERRORS as exc:
+            raise MailIdleDisconnected("IMAP IDLE connection closed") from exc
         finally:
             if idle_started:
                 try:
                     sock.settimeout(10)
                     client.send(b"DONE\r\n")
                     MailClient._drain_idle_done(client, tag)
+                except _IDLE_DISCONNECT_ERRORS:
+                    pass
                 finally:
                     sock.settimeout(old_timeout)
             client.tagged_commands.pop(tag, None)

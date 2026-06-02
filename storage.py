@@ -7,7 +7,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-
 DEFAULT_OWNER_ID = "default"
 
 

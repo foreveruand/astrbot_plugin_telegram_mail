@@ -29,6 +29,12 @@
         "default": 10,
         "hint": "避免首次或长时间离线后刷屏。"
     },
+    "historical_mail_grace_seconds": {
+        "description": "历史邮件 Date 宽限秒数",
+        "type": "int",
+        "default": 86400,
+        "hint": "已有 last_check 后，未见 UID 的邮件如果 Date 早于 last_check 超过该秒数，会只标记已处理但不推送，用于避免 IMAP 状态异常时推送多年旧邮件。"
+    },
     "preview_length": {
         "description": "邮件卡片预览长度",
         "type": "int",

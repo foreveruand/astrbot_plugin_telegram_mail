@@ -68,3 +68,4 @@ class ParsedMail:
     unsubscribe_urls: list[str] = field(default_factory=list)
     unsubscribe_mailtos: list[str] = field(default_factory=list)
     received_at: datetime = field(default_factory=datetime.now)
+    date_datetime: datetime | None = None

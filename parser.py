@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import re
+from datetime import datetime
 from email import policy
 from email.header import decode_header, make_header
 from email.message import EmailMessage, Message
@@ -31,7 +32,8 @@ def parse_message(raw: bytes, *, account_id: str, folder: str, uid: str) -> Pars
     sender = decode_mime_header(message.get("From", "")) or "(Unknown sender)"
     _, sender_email = parseaddr(sender)
     recipients = [addr for _, addr in getaddresses(message.get_all("To", []))]
-    date = _format_date(message.get("Date", ""))
+    date_datetime = parse_message_datetime(message.get("Date", ""))
+    date = _format_date(message.get("Date", ""), date_datetime)
     body_text, body_html = _extract_bodies(message)
     attachments = _extract_attachments(message)
     unsubscribe_urls, unsubscribe_mailtos = _extract_unsubscribe(message, body_html)
@@ -51,6 +53,7 @@ def parse_message(raw: bytes, *, account_id: str, folder: str, uid: str) -> Pars
         attachments=attachments,
         unsubscribe_urls=unsubscribe_urls,
         unsubscribe_mailtos=unsubscribe_mailtos,
+        date_datetime=date_datetime,
     )
 
 
@@ -91,14 +94,21 @@ def extract_attachment_payload(raw: bytes, index: int) -> tuple[str, bytes, str]
     raise IndexError(f"Attachment not found: {index}")
 
 
-def _format_date(value: str) -> str:
+def parse_message_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return parsedate_to_datetime(value)
+    except Exception:
+        return None
+
+
+def _format_date(value: str, parsed: datetime | None = None) -> str:
     if not value:
         return ""
-    try:
-        parsed = parsedate_to_datetime(value)
+    if parsed is not None:
         return parsed.strftime("%Y-%m-%d %H:%M")
-    except Exception:
-        return decode_mime_header(value)
+    return decode_mime_header(value)
 
 
 def _extract_bodies(message: EmailMessage | Message) -> tuple[str, str]:

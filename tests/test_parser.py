@@ -10,6 +10,7 @@ def test_parse_plain_message_with_attachment():
         b"From: Sender <sender@example.com>\r\n"
         b"To: User <user@example.com>\r\n"
         b"Subject: Test mail\r\n"
+        b"Date: Tue, 02 Jun 2026 11:30:00 +0800\r\n"
         b"Message-ID: <msg-1@example.com>\r\n"
         b"List-Unsubscribe: <https://example.com/unsub>, <mailto:off@example.com>\r\n"
         b"MIME-Version: 1.0\r\n"
@@ -31,6 +32,8 @@ def test_parse_plain_message_with_attachment():
 
     assert parsed.sender_email == "sender@example.com"
     assert parsed.subject == "Test mail"
+    assert parsed.date == "2026-06-02 11:30"
+    assert parsed.date_datetime is not None
     assert parsed.body_text == "Hello body"
     assert parsed.attachments[0].filename == "note.txt"
     assert parsed.unsubscribe_urls == ["https://example.com/unsub"]

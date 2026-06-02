@@ -9,7 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +29,7 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 
-from .mail_client import IdleNotSupported, MailClient
+from .mail_client import IdleNotSupported, MailClient, MailIdleDisconnected
 from .models import MailAccount, ParsedMail
 from .parser import extract_attachment_payload, parse_message
 from .storage import JsonStore
@@ -40,6 +40,7 @@ DEFAULT_PREVIEW_LENGTH = 600
 DEFAULT_PAGE_SIZE = 2500
 DEFAULT_MAX_FETCH = 10
 DEFAULT_IDLE_TIMEOUT = 1740
+DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS = 86400
 IDLE_WAIT_SLICE = 60
 MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 MICROSOFT_DEVICE_CODE_URL = (
@@ -230,7 +231,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.6",
+    "0.1.7",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -401,6 +402,31 @@ class TelegramMailPlugin(Star):
                     )
                     self.store.save()
                 await self._sleep_poll_interval(account)
+            except MailIdleDisconnected as exc:
+                logger.warning(
+                    "Mail IDLE connection closed for account %s folder %s: %s",
+                    account.account_id,
+                    folder,
+                    exc,
+                )
+                self._set_folder_mode(account, folder, "polling fallback")
+                try:
+                    await self._poll_folder(account, folder, push=True)
+                    self.store.clear_last_error(account.owner_id, account.account_id)
+                    last_resync = time.monotonic()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as poll_exc:
+                    logger.exception(
+                        "Mail reconnect poll failed for account %s folder %s",
+                        account.account_id,
+                        folder,
+                    )
+                    self.store.set_last_error(
+                        account.owner_id, account.account_id, str(poll_exc)
+                    )
+                    self.store.save()
+                await self._sleep_poll_interval(account)
             except Exception as exc:
                 logger.exception(
                     "Mail IDLE failed for account %s folder %s",
@@ -483,6 +509,15 @@ class TelegramMailPlugin(Star):
                 uid=uid,
             )
             self.store.add_seen(account.owner_id, account.account_id, folder, uid)
+            if self._is_historical_mail(account, parsed):
+                logger.info(
+                    "Skip historical mail for account %s folder %s UID %s date=%s",
+                    account.account_id,
+                    folder,
+                    uid,
+                    parsed.date or "-",
+                )
+                continue
             if self.store.is_blocked(
                 account.owner_id,
                 account.account_id,
@@ -503,6 +538,42 @@ class TelegramMailPlugin(Star):
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         )
         self.store.save()
+
+    def _is_historical_mail(self, account: MailAccount, parsed: ParsedMail) -> bool:
+        if parsed.date_datetime is None:
+            return False
+        last_check = self._last_check_datetime(account)
+        if last_check is None:
+            return False
+        grace_seconds = max(
+            self._config_int(
+                "historical_mail_grace_seconds",
+                DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS,
+            ),
+            0,
+        )
+        cutoff = last_check - timedelta(seconds=grace_seconds)
+        return self._as_local_naive(parsed.date_datetime) < cutoff
+
+    def _last_check_datetime(self, account: MailAccount) -> datetime | None:
+        value = self.store.last_check(account.owner_id, account.account_id)
+        if not value:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        try:
+            return self._as_local_naive(datetime.fromisoformat(value))
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _as_local_naive(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value
+        return value.astimezone().replace(tzinfo=None)
 
     async def _push_mail_card(
         self,
