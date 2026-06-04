@@ -7,14 +7,14 @@
 - 多邮箱账号配置，按 Telegram 用户 ID 独立保存。
 - IMAP IDLE 实时监听新邮件并推送到指定 Telegram `chat_id`。
 - 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询。
-- 邮件卡片展示发件人、主题、时间、正文预览和附件数量。
-- `Attachments` 按钮列出附件并按需发送。
+- 邮件卡片使用 Telegram Markdown 展示主题、发件人、时间和正文预览，并会转义邮件动态内容，避免格式被邮件正文破坏。
+- 附件直接显示在主邮件卡片按钮上，点击后按需发送对应附件；旧的 `Attachments` 回调入口仍保留兼容。
 - `More` 按钮展示全文并支持 Prev/Next 翻页。
 - `Action` 按钮支持 Reply、Unsubscribe、Block Sender、Archive、Delete、Mark Read、Mark Unread。
 - 邮件卡片的回调编辑消息会关闭网页预览，避免长网址触发 Telegram 预览截断问题。
 - SMTP 支持 `/mail send` 新建邮件和 `/mail reply` 回复邮件。
 - 邮件正文展示前会先过滤常见的 HTML/CSS 噪音和重复头部片段，避免正文开头被一大段无效内容淹没。
-- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。
+- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。Outlook/Microsoft 账号默认使用 `imap_folder_mode: "auto"` 自动发现可收件文件夹，可覆盖被规则移动到“验证码”等自定义文件夹的邮件。
 
 ## 配置
 
@@ -88,6 +88,7 @@ Outlook 示例：
   "message_type": "friend",
   "imap_user": "your@outlook.com",
   "imap_folders": ["INBOX"],
+  "imap_folder_mode": "auto",
   "smtp_user": "your@outlook.com",
   "oauth2_client_id": "your-app-client-id"
 }
@@ -95,13 +96,18 @@ Outlook 示例：
 
 `provider: "outlook"` 会默认使用 Microsoft 文档中的 IMAP/SMTP 设置：IMAP `outlook.office365.com:993` SSL/TLS，SMTP `smtp-mail.outlook.com:587` STARTTLS，并默认启用 OAuth2。保存账号后执行 `/mail oauth outlook-main`，插件会返回 Microsoft 授权链接和一次性代码；用户授权完成后，access token / refresh token 会保存到插件数据目录的 `state.json` 用户分桶中，后续 access token 过期会用 refresh token 自动刷新。
 
+`imap_folder_mode` 有两个值：
+
+- `configured`：只抓取 `imap_folders` 中配置的文件夹。Gmail、QQ 等非 Outlook 账号默认使用该模式，保持旧行为。
+- `auto`：通过 IMAP `LIST` 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Deleted Items、Junk、Spam、Archive、Outbox、Sync Issues、Gmail All Mail 等非收件或容易重复的文件夹。自动发现失败时会回退到 `imap_folders`，避免账号不可用。
+
 Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
 
 插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 
-`realtime_enabled` 默认开启。开启后插件会为每个 `imap_folders` 文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒。
+`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
 
 已有 `last_check` 的账号在检查新 UID 时会额外校验邮件头 `Date`。如果邮件 `Date` 早于上次检查时间超过 `historical_mail_grace_seconds` 秒，插件会把该 UID 标记为已处理但不推送，避免 IMAP 重连、UID 状态异常或服务端返回旧 UID 时刷出历史邮件。默认宽限为 86400 秒；如需更严格或更宽松，可在插件设置中调整：
 

@@ -10,6 +10,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,28 @@ DEFAULT_MAX_FETCH = 10
 DEFAULT_IDLE_TIMEOUT = 1740
 DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS = 86400
 IDLE_WAIT_SLICE = 60
+IMAP_FOLDER_MODE_AUTO = "auto"
+IMAP_FOLDER_MODE_CONFIGURED = "configured"
+IMAP_FOLDER_MODES = {IMAP_FOLDER_MODE_AUTO, IMAP_FOLDER_MODE_CONFIGURED}
+EXCLUDED_AUTO_FOLDER_NAMES = {
+    "all mail",
+    "archive",
+    "bulk mail",
+    "deleted items",
+    "deleted messages",
+    "draft",
+    "drafts",
+    "junk",
+    "junk e-mail",
+    "junk email",
+    "outbox",
+    "sent",
+    "sent items",
+    "sent mail",
+    "spam",
+    "sync issues",
+    "trash",
+}
 MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 MICROSOFT_DEVICE_CODE_URL = (
     "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
@@ -167,6 +190,7 @@ def _build_provider_account_config(
         )
     else:
         base["auth_type"] = "oauth2"
+        base["imap_folder_mode"] = IMAP_FOLDER_MODE_AUTO
         if oauth2_client_id.strip():
             base["oauth2_client_id"] = oauth2_client_id.strip()
         if oauth2_client_secret.strip():
@@ -231,7 +255,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.7",
+    "0.1.8",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -248,6 +272,7 @@ class TelegramMailPlugin(Star):
         self._stop_event = asyncio.Event()
         self._thread_stop_event = threading.Event()
         self.folder_modes: dict[tuple[str, str], str] = {}
+        self.resolved_folders: dict[str, list[str]] = {}
 
     async def initialize(self) -> None:
         _patch_telegram_callback_edit_message_preview()
@@ -256,8 +281,9 @@ class TelegramMailPlugin(Star):
         for account in accounts:
             if not account.enabled:
                 continue
+            folders = await self._resolve_account_folders(account)
             if account.realtime_enabled:
-                for folder in account.imap_folders:
+                for folder in folders:
                     task = asyncio.create_task(self._watch_folder_loop(account, folder))
                     self.tasks.append(task)
             else:
@@ -469,7 +495,7 @@ class TelegramMailPlugin(Star):
 
     async def _poll_account(self, account: MailAccount, *, push: bool) -> int:
         total = 0
-        for folder in account.imap_folders:
+        for folder in await self._resolve_account_folders(account):
             total += await self._poll_folder(account, folder, push=push)
         return total
 
@@ -1211,14 +1237,17 @@ class TelegramMailPlugin(Star):
         parsed: ParsedMail,
         token: str,
     ) -> MessageChain:
-        preview = self._truncate(parsed.body_text, self._preview_length())
+        preview = self._markdown_escape(
+            self._truncate(parsed.body_text, self._preview_length())
+            or "(No text content)"
+        )
+        sender_text = self._sender_markdown(parsed)
         text = (
-            f"📬 {account.display_name}\n"
-            f"From: {parsed.sender}\n"
-            f"Subject: {parsed.subject}\n"
-            f"Date: {parsed.date or '-'}\n"
-            f"Attachments: {len(parsed.attachments)}\n\n"
-            f"{preview or '(No text content)'}"
+            f"📬 {self._markdown_escape(account.display_name)}\n"
+            f"*Subject:* {self._markdown_escape(parsed.subject)}\n"
+            f"*From:* {sender_text}\n"
+            f"*Date:* {self._markdown_escape(parsed.date or '-')}\n\n"
+            f"{preview}"
         )
         buttons = [
             [
@@ -1230,16 +1259,19 @@ class TelegramMailPlugin(Star):
             ]
         ]
         if parsed.attachments:
-            buttons.insert(
-                0,
-                [
+            attachment_buttons = []
+            for attachment in parsed.attachments:
+                attachment_buttons.append(
                     {
-                        "text": f"Attachments ({len(parsed.attachments)})",
-                        "callback_data": f"{CALLBACK_PREFIX}:{token}:attachments",
+                        "text": self._attachment_button_text(attachment.filename),
+                        "callback_data": f"{CALLBACK_PREFIX}:{token}:att:{attachment.index}",
                     }
-                ],
-            )
-        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+                )
+            buttons = [
+                attachment_buttons[index : index + 2]
+                for index in range(0, len(attachment_buttons), 2)
+            ] + buttons
+        return MessageChain([Plain(text)]).use_markdown(True).inline_keyboard(buttons)
 
     def _full_text_card(
         self,
@@ -1252,9 +1284,9 @@ class TelegramMailPlugin(Star):
         pages = self._paginate(body, self._page_size())
         page = max(0, min(page, len(pages) - 1))
         text = (
-            f"📖 {account.display_name} · {parsed.subject}\n"
+            f"📖 {self._markdown_escape(account.display_name)} · {self._markdown_escape(parsed.subject)}\n"
             f"Page {page + 1}/{len(pages)}\n\n"
-            f"{pages[page]}"
+            f"{self._markdown_escape(pages[page])}"
         )
         nav = []
         if page > 0:
@@ -1277,20 +1309,22 @@ class TelegramMailPlugin(Star):
         buttons.append(
             [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}]
         )
-        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+        return MessageChain([Plain(text)]).use_markdown(True).inline_keyboard(buttons)
 
     def _attachments_card(self, parsed: ParsedMail, token: str) -> MessageChain:
         if not parsed.attachments:
-            return MessageChain([Plain("这封邮件没有附件。")])
+            return MessageChain([Plain("这封邮件没有附件。")]).use_markdown(True)
         lines = ["📎 附件列表"]
         buttons = []
         for attachment in parsed.attachments:
             size = self._format_size(attachment.size)
-            lines.append(f"{attachment.index + 1}. {attachment.filename} ({size})")
+            lines.append(
+                f"{attachment.index + 1}\\. {self._markdown_escape(attachment.filename)} \\({self._markdown_escape(size)}\\)"
+            )
             buttons.append(
                 [
                     {
-                        "text": f"发送 {attachment.index + 1}",
+                        "text": self._attachment_button_text(attachment.filename),
                         "callback_data": f"{CALLBACK_PREFIX}:{token}:att:{attachment.index}",
                     }
                 ]
@@ -1298,10 +1332,18 @@ class TelegramMailPlugin(Star):
         buttons.append(
             [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}]
         )
-        return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
+        return (
+            MessageChain([Plain("\n".join(lines))])
+            .use_markdown(True)
+            .inline_keyboard(buttons)
+        )
 
     def _action_card(self, parsed: ParsedMail, token: str) -> MessageChain:
-        text = f"⚙️ 邮件操作\n{parsed.subject}\nFrom: {parsed.sender}"
+        text = (
+            f"⚙️ 邮件操作\n"
+            f"*Subject:* {self._markdown_escape(parsed.subject)}\n"
+            f"*From:* {self._sender_markdown(parsed)}"
+        )
         buttons = [
             [
                 {"text": "Reply", "callback_data": f"{CALLBACK_PREFIX}:{token}:reply"},
@@ -1336,22 +1378,28 @@ class TelegramMailPlugin(Star):
             ],
             [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:back"}],
         ]
-        return MessageChain([Plain(text)]).inline_keyboard(buttons)
+        return MessageChain([Plain(text)]).use_markdown(True).inline_keyboard(buttons)
 
     def _unsubscribe_card(self, parsed: ParsedMail, token: str) -> MessageChain:
-        lines = [f"退订信息\n{parsed.subject}"]
+        lines = [f"退订信息\n*Subject:* {self._markdown_escape(parsed.subject)}"]
         buttons = []
         for idx, url in enumerate(parsed.unsubscribe_urls, start=1):
             buttons.append([{"text": f"Open unsubscribe link {idx}", "url": url}])
         if parsed.unsubscribe_mailtos:
             lines.append("\nMailto:")
-            lines.extend(parsed.unsubscribe_mailtos)
+            lines.extend(
+                self._markdown_escape(mailto) for mailto in parsed.unsubscribe_mailtos
+            )
         if not buttons and not parsed.unsubscribe_mailtos:
             lines.append("\n未找到 List-Unsubscribe 或正文退订链接。")
         buttons.append(
             [{"text": "Back", "callback_data": f"{CALLBACK_PREFIX}:{token}:action"}]
         )
-        return MessageChain([Plain("\n".join(lines))]).inline_keyboard(buttons)
+        return (
+            MessageChain([Plain("\n".join(lines))])
+            .use_markdown(True)
+            .inline_keyboard(buttons)
+        )
 
     def _render_status(self, owner_id: str = OWNER_ID_FALLBACK) -> str:
         accounts = [
@@ -1363,6 +1411,7 @@ class TelegramMailPlugin(Star):
         for account in accounts:
             status = "enabled" if account.enabled else "disabled"
             mode = self._account_mode(account)
+            folder_summary = self._account_folder_summary(account)
             last_check = self.store.last_check(owner_id, account.account_id) or "-"
             last_error = self.store.last_error(owner_id, account.account_id)
             oauth2_state = self.store.get_oauth2_state(owner_id, account.account_id)
@@ -1371,7 +1420,9 @@ class TelegramMailPlugin(Star):
             )
             lines.append(
                 f"- {account.account_id} ({account.display_name}): {status}, "
-                f"mode={mode}, oauth2={oauth2_status}, last_check={last_check}, target={account.target_chat_id}"
+                f"mode={mode}, folder_mode={account.imap_folder_mode}, "
+                f"folders={folder_summary}, oauth2={oauth2_status}, "
+                f"last_check={last_check}, target={account.target_chat_id}"
             )
             if last_error:
                 lines.append(f"  error={last_error}")
@@ -1459,6 +1510,7 @@ class TelegramMailPlugin(Star):
         imap_folders = item.get("imap_folders") or ["INBOX"]
         if isinstance(imap_folders, str):
             imap_folders = [imap_folders]
+        imap_folder_mode = self._account_folder_mode(item, is_outlook)
         oauth2_state = {}
         store = getattr(self, "store", None)
         if store is not None:
@@ -1480,6 +1532,7 @@ class TelegramMailPlugin(Star):
             imap_auth_type=imap_auth_type,
             imap_tls=bool(item.get("imap_tls", True)),
             imap_folders=[str(folder) for folder in imap_folders],
+            imap_folder_mode=imap_folder_mode,
             smtp_host=str(
                 item.get("smtp_host") or ("smtp-mail.outlook.com" if is_outlook else "")
             ).strip(),
@@ -1581,7 +1634,7 @@ class TelegramMailPlugin(Star):
         return MessageType.FRIEND_MESSAGE
 
     def _set_account_mode(self, account: MailAccount, mode: str) -> None:
-        for folder in account.imap_folders:
+        for folder in self._cached_account_folders(account):
             self._set_folder_mode(account, folder, mode)
 
     def _set_folder_mode(self, account: MailAccount, folder: str, mode: str) -> None:
@@ -1592,17 +1645,92 @@ class TelegramMailPlugin(Star):
             return "-"
         if not account.realtime_enabled:
             return "polling"
+        folders = self._cached_account_folders(account)
         modes = {
             self.folder_modes.get(
                 (self._account_state_key(account), folder), "starting"
             )
-            for folder in account.imap_folders
+            for folder in folders
         }
         if "polling fallback" in modes:
             return "polling fallback"
         if modes == {"idle"}:
             return "idle"
         return ", ".join(sorted(modes))
+
+    async def _resolve_account_folders(self, account: MailAccount) -> list[str]:
+        key = self._account_state_key(account)
+        resolved_folders = self._resolved_folder_cache()
+        if account.imap_folder_mode == IMAP_FOLDER_MODE_CONFIGURED:
+            folders = account.imap_folders
+            resolved_folders[key] = folders
+            return folders
+        try:
+            listed = await asyncio.to_thread(self.mail_client.list_folders, account)
+        except Exception as exc:
+            logger.warning(
+                "Failed to discover IMAP folders for account %s, fallback to configured folders: %s",
+                account.account_id,
+                exc,
+            )
+            resolved_folders[key] = account.imap_folders
+            return account.imap_folders
+        folders = self._filter_auto_folders(listed)
+        if not folders:
+            folders = account.imap_folders
+        resolved_folders[key] = folders
+        return folders
+
+    def _cached_account_folders(self, account: MailAccount) -> list[str]:
+        return self._resolved_folder_cache().get(
+            self._account_state_key(account), account.imap_folders
+        )
+
+    def _resolved_folder_cache(self) -> dict[str, list[str]]:
+        if not hasattr(self, "resolved_folders"):
+            self.resolved_folders = {}
+        return self.resolved_folders
+
+    def _account_folder_summary(self, account: MailAccount) -> str:
+        folders = self._cached_account_folders(account)
+        if len(folders) <= 4:
+            return ", ".join(folders)
+        return f"{len(folders)} ({', '.join(folders[:3])}, ...)"
+
+    def _account_folder_mode(
+        self,
+        item: dict[str, Any],
+        is_outlook: bool,
+    ) -> str:
+        value = str(
+            item.get("imap_folder_mode")
+            or self.config.get("imap_folder_mode")
+            or (IMAP_FOLDER_MODE_AUTO if is_outlook else IMAP_FOLDER_MODE_CONFIGURED)
+        ).lower()
+        return value if value in IMAP_FOLDER_MODES else IMAP_FOLDER_MODE_CONFIGURED
+
+    @staticmethod
+    def _filter_auto_folders(folders: list[str]) -> list[str]:
+        selected = []
+        seen = set()
+        for folder in folders:
+            folder = str(folder or "").strip()
+            if not folder:
+                continue
+            if TelegramMailPlugin._is_excluded_auto_folder(folder):
+                continue
+            key = folder.casefold()
+            if key in seen:
+                continue
+            selected.append(folder)
+            seen.add(key)
+        return selected
+
+    @staticmethod
+    def _is_excluded_auto_folder(folder: str) -> bool:
+        normalized = folder.replace("\\", "/").strip().casefold()
+        parts = [part for part in normalized.split("/") if part]
+        return any(part in EXCLUDED_AUTO_FOLDER_NAMES for part in parts)
 
     @staticmethod
     def _truncate(value: str, limit: int) -> str:
@@ -1623,6 +1751,29 @@ class TelegramMailPlugin(Star):
         if size < 1024 * 1024:
             return f"{size / 1024:.1f} KB"
         return f"{size / 1024 / 1024:.1f} MB"
+
+    @staticmethod
+    def _markdown_escape(value: str) -> str:
+        return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(value or ""))
+
+    def _sender_markdown(self, parsed: ParsedMail) -> str:
+        email = parsed.sender_email
+        display_name, parsed_email = parseaddr(parsed.sender)
+        email = email or parsed_email
+        label = display_name or email or parsed.sender or "(Unknown sender)"
+        if not email:
+            return self._markdown_escape(label)
+        return (
+            f"[{self._markdown_escape(label)}]"
+            f"(mailto:{self._markdown_link_escape(email)})"
+        )
+
+    @staticmethod
+    def _markdown_link_escape(value: str) -> str:
+        return str(value or "").replace("\\", "\\\\").replace(")", r"\)")
+
+    def _attachment_button_text(self, filename: str) -> str:
+        return f"📎 {self._truncate(filename or 'attachment', 28)}"
 
     @staticmethod
     def _safe_filename(value: str) -> str:

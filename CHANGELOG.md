@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.8
+
+- Improved Telegram mail cards with Markdown subject/from/date formatting and escaped dynamic mail content.
+- Moved attachment callbacks onto the main mail card as direct attachment buttons, while keeping the old attachment-list callback compatible.
+- Added `imap_folder_mode` with Outlook/Microsoft auto folder discovery and fallback to configured folders when discovery fails.
+- Updated `/mail status` to show folder mode and resolved folder summary.
+
 ## 0.1.7
 
 - Treated IMAP IDLE socket EOF/BrokenPipe as recoverable disconnects to avoid repeated traceback logs.

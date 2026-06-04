@@ -1,5 +1,7 @@
 from astrbot_plugin_telegram_mail.main import (
     DEFAULT_IDLE_TIMEOUT,
+    IMAP_FOLDER_MODE_AUTO,
+    IMAP_FOLDER_MODE_CONFIGURED,
     TelegramMailPlugin,
 )
 
@@ -72,6 +74,22 @@ def test_outlook_provider_uses_oauth2_defaults():
     assert account.smtp_tls == "starttls"
     assert account.imap_auth_type == "oauth2"
     assert account.smtp_auth_type == "oauth2"
+    assert account.imap_folder_mode == IMAP_FOLDER_MODE_AUTO
+
+
+def test_regular_account_uses_configured_folder_mode_by_default():
+    account = _plugin()._parse_account(_account_config(), "u1")
+
+    assert account.imap_folder_mode == IMAP_FOLDER_MODE_CONFIGURED
+
+
+def test_global_folder_mode_can_override_regular_account_default():
+    account = _plugin({"imap_folder_mode": "auto"})._parse_account(
+        _account_config(),
+        "u1",
+    )
+
+    assert account.imap_folder_mode == IMAP_FOLDER_MODE_AUTO
 
 
 def test_outlook_provider_uses_plugin_oauth_defaults():

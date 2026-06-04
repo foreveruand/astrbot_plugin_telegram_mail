@@ -20,6 +20,7 @@ class MailAccount:
     imap_auth_type: str
     imap_tls: bool
     imap_folders: list[str]
+    imap_folder_mode: str
     smtp_host: str
     smtp_port: int
     smtp_user: str

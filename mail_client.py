@@ -3,6 +3,7 @@ from __future__ import annotations
 import email.utils
 import imaplib
 import json
+import re
 import select
 import smtplib
 import ssl
@@ -51,6 +52,23 @@ class MailClient:
             if status != "OK" or not data:
                 return []
             return [uid.decode("ascii", errors="ignore") for uid in data[0].split()]
+
+    def list_folders(self, account: MailAccount) -> list[str]:
+        with self._imap(account) as client:
+            status, data = client.list()
+            if status != "OK" or not data:
+                return []
+            folders = []
+            for item in data:
+                if not item:
+                    continue
+                line = item.decode("utf-8", errors="replace")
+                if self._is_nonselectable_list_entry(line):
+                    continue
+                folder = self._parse_list_folder_name(line)
+                if folder:
+                    folders.append(folder)
+            return folders
 
     def fetch_message(self, account: MailAccount, folder: str, uid: str) -> bytes:
         with self._imap(account) as client:
@@ -189,6 +207,22 @@ class MailClient:
         status, _ = client.select(folder)
         if status != "OK":
             raise RuntimeError(f"Failed to select IMAP folder: {folder}")
+
+    @staticmethod
+    def _parse_list_folder_name(line: str) -> str:
+        match = re.search(r'\s("([^"\\]|\\.)*"|NIL)\s(.+)$', line)
+        if not match:
+            return ""
+        name = match.group(3).strip()
+        if name.startswith('"') and name.endswith('"'):
+            name = name[1:-1]
+            return name.replace(r"\"", '"').replace(r"\\", "\\")
+        return name
+
+    @staticmethod
+    def _is_nonselectable_list_entry(line: str) -> bool:
+        attrs = line.split(")", 1)[0].casefold()
+        return r"\noselect" in attrs or r"\nonexistent" in attrs
 
     @staticmethod
     def _ensure_folder(client: imaplib.IMAP4, folder: str) -> None:

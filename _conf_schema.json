@@ -17,6 +17,12 @@
         "default": 1740,
         "hint": "账号未设置 idle_timeout 时使用该值。插件内部会分片等待以便及时停止。"
     },
+    "imap_folder_mode": {
+        "description": "默认 IMAP 文件夹抓取模式",
+        "type": "string",
+        "default": "",
+        "hint": "可选 configured/auto。留空时 Outlook/Microsoft 账号默认 auto，其它账号默认 configured；账号配置可覆盖该值。auto 会从 IMAP LIST 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Junk、Spam、Archive、All Mail 等非收件或易重复文件夹。"
+    },
     "notify_existing_on_first_run": {
         "description": "首次运行推送历史邮件",
         "type": "bool",
