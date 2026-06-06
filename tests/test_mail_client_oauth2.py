@@ -22,6 +22,7 @@ def _account(**overrides):
         "imap_auth_type": "oauth2",
         "imap_tls": True,
         "imap_folders": ["INBOX"],
+        "imap_folder_mode": "configured",
         "smtp_host": "smtp-mail.outlook.com",
         "smtp_port": 587,
         "smtp_user": "user@outlook.com",
@@ -50,7 +51,7 @@ def _account(**overrides):
 def test_xoauth2_string_contains_user_and_bearer_token():
     assert (
         MailClient._xoauth2_string("user@outlook.com", "token")
-        == "user=user@outlook.com\x01auth=Bearer token\x01\x01"
+        == b"user=user@outlook.com\x01auth=Bearer token\x01\x01"
     )
 
 
@@ -59,7 +60,8 @@ def test_smtp_oauth2_uses_auth_instead_of_login():
 
     class Client:
         def auth(self, mechanism, authobject):
-            calls.append((mechanism, authobject(None)))
+            response = authobject()
+            calls.append((mechanism, response, type(response)))
 
         def login(self, user, password):
             raise AssertionError("login should not be used for oauth2")
@@ -70,6 +72,7 @@ def test_smtp_oauth2_uses_auth_instead_of_login():
         (
             "XOAUTH2",
             "user=user@outlook.com\x01auth=Bearer access-token\x01\x01",
+            str,
         )
     ]
 
@@ -109,6 +112,7 @@ def test_oauth2_access_token_uses_loader_state():
 
 def test_oauth2_refresh_updates_persistent_state(monkeypatch):
     updates = []
+    timeouts = []
 
     class Response:
         def __enter__(self):
@@ -120,12 +124,17 @@ def test_oauth2_refresh_updates_persistent_state(monkeypatch):
         def read(self):
             return b'{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}'
 
+    def urlopen(request, timeout):
+        timeouts.append(timeout)
+        return Response()
+
     monkeypatch.setattr(
         "astrbot_plugin_telegram_mail.mail_client.urllib.request.urlopen",
-        lambda request, timeout: Response(),
+        urlopen,
     )
     client = MailClient(
-        oauth2_token_updater=lambda account, payload: updates.append(payload)
+        oauth2_token_updater=lambda account, payload: updates.append(payload),
+        network_timeout=7,
     )
     account = _account(
         oauth2_access_token="",
@@ -136,6 +145,7 @@ def test_oauth2_refresh_updates_persistent_state(monkeypatch):
     assert client._oauth2_access_token(account) == "new-access"
     assert updates[0]["refresh_token"] == "new-refresh"
     assert updates[0]["expires_at"] > 0
+    assert timeouts == [7]
 
 
 def test_oauth2_access_token_prefers_stored_refresh_token(monkeypatch):
@@ -240,3 +250,35 @@ def test_oauth2_refresh_error_includes_microsoft_description(monkeypatch):
     )
     with pytest.raises(RuntimeError, match="AADSTS700082: refresh token expired"):
         MailClient()._oauth2_access_token(account)
+
+
+def test_imap_connection_uses_configured_timeout(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, host, port, timeout):
+            calls.append((host, port, timeout))
+
+        def login(self, user, password):
+            return "OK", []
+
+        def close(self):
+            return None
+
+        def logout(self):
+            return None
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.imaplib.IMAP4_SSL",
+        Client,
+    )
+    account = _account(
+        imap_auth_type="password",
+        imap_password="secret",
+        imap_tls=True,
+    )
+
+    with MailClient(network_timeout=9)._imap(account):
+        pass
+
+    assert calls == [("outlook.office365.com", 993, 9)]

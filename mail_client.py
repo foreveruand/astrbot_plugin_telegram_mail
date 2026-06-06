@@ -33,6 +33,7 @@ _IDLE_DISCONNECT_ERRORS = (
     OSError,
     TimeoutError,
 )
+DEFAULT_NETWORK_TIMEOUT = 15
 
 
 class MailClient:
@@ -40,10 +41,12 @@ class MailClient:
         self,
         oauth2_token_updater: Callable[[MailAccount, dict], None] | None = None,
         oauth2_token_loader: Callable[[MailAccount], dict] | None = None,
+        network_timeout: int = DEFAULT_NETWORK_TIMEOUT,
     ) -> None:
         self._oauth2_cache: dict[str, tuple[str, float]] = {}
         self._oauth2_token_updater = oauth2_token_updater
         self._oauth2_token_loader = oauth2_token_loader
+        self.network_timeout = max(int(network_timeout), 1)
 
     def list_uids(self, account: MailAccount, folder: str) -> list[str]:
         with self._imap(account) as client:
@@ -173,13 +176,20 @@ class MailClient:
         if account.smtp_tls == "ssl":
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(
-                account.smtp_host, account.smtp_port, context=context
+                account.smtp_host,
+                account.smtp_port,
+                context=context,
+                timeout=self.network_timeout,
             ) as client:
                 self._smtp_login(client, account)
                 client.send_message(message)
             return
 
-        with smtplib.SMTP(account.smtp_host, account.smtp_port) as client:
+        with smtplib.SMTP(
+            account.smtp_host,
+            account.smtp_port,
+            timeout=self.network_timeout,
+        ) as client:
             if account.smtp_tls == "starttls":
                 client.starttls(context=ssl.create_default_context())
             self._smtp_login(client, account)
@@ -187,9 +197,17 @@ class MailClient:
 
     def _imap(self, account: MailAccount):
         if account.imap_tls:
-            client = imaplib.IMAP4_SSL(account.imap_host, account.imap_port)
+            client = imaplib.IMAP4_SSL(
+                account.imap_host,
+                account.imap_port,
+                timeout=self.network_timeout,
+            )
         else:
-            client = imaplib.IMAP4(account.imap_host, account.imap_port)
+            client = imaplib.IMAP4(
+                account.imap_host,
+                account.imap_port,
+                timeout=self.network_timeout,
+            )
         if account.imap_auth_type == "oauth2":
             client.authenticate(
                 "XOAUTH2",
@@ -247,18 +265,18 @@ class MailClient:
         if account.smtp_auth_type == "oauth2":
             client.auth(
                 "XOAUTH2",
-                lambda _: self._xoauth2_string(
+                lambda _=None: self._xoauth2_string(
                     user,
                     self._oauth2_access_token(account),
-                ),
+                ).decode("ascii"),
             )
             return
         password = account.smtp_password or account.imap_password
         client.login(user, password)
 
     @staticmethod
-    def _xoauth2_string(user: str, access_token: str) -> str:
-        return f"user={user}\x01auth=Bearer {access_token}\x01\x01"
+    def _xoauth2_string(user: str, access_token: str) -> bytes:
+        return f"user={user}\x01auth=Bearer {access_token}\x01\x01".encode("ascii")
 
     def _oauth2_access_token(self, account: MailAccount) -> str:
         cache_key = account.account_id
@@ -306,7 +324,10 @@ class MailClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.network_timeout,
+            ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

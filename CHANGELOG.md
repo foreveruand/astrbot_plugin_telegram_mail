@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9
+
+- Fixed Outlook OAuth2 IMAP authentication by returning bytes from the XOAUTH2 IMAP callback payload.
+- Isolated blocking IMAP/SMTP/OAuth calls in a plugin-owned thread pool so mail connection stalls do not consume AstrBot's default executor.
+- Split long IMAP IDLE waits into 60-second executor slices so IDLE folders do not monopolize the plugin worker pool.
+- Added explicit network timeouts for IMAP, SMTP, and OAuth requests to fail unhealthy mail connections quickly.
+- Deferred realtime folder discovery to background watcher tasks so plugin hot-loading does not block AstrBot services.
+- Added `network_timeout` and `max_workers` plugin settings for tuning mailbox network isolation.
+
 ## 0.1.8
 
 - Improved Telegram mail cards with Markdown subject/from/date formatting and escaped dynamic mail content.

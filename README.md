@@ -101,13 +101,22 @@ Outlook 示例：
 - `configured`：只抓取 `imap_folders` 中配置的文件夹。Gmail、QQ 等非 Outlook 账号默认使用该模式，保持旧行为。
 - `auto`：通过 IMAP `LIST` 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Deleted Items、Junk、Spam、Archive、Outbox、Sync Issues、Gmail All Mail 等非收件或容易重复的文件夹。自动发现失败时会回退到 `imap_folders`，避免账号不可用。
 
-Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
+Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
 
 插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 
-`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
+`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒；插件内部会将该时长切成 60 秒一片执行，每片结束后释放后台线程，避免多个 IDLE 文件夹长期占满线程池。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
+
+插件会把 IMAP、SMTP 和 OAuth 等阻塞型邮箱网络调用放在独立线程池中执行，避免邮箱服务器或网络异常时占用 AstrBot 默认线程资源并影响 WebUI 或其它渠道连接。默认邮箱网络超时为 15 秒，默认后台线程数为 4；如账号或自动发现文件夹较多，可在插件设置中调整：
+
+```json
+{
+  "network_timeout": 15,
+  "max_workers": 4
+}
+```
 
 已有 `last_check` 的账号在检查新 UID 时会额外校验邮件头 `Date`。如果邮件 `Date` 早于上次检查时间超过 `historical_mail_grace_seconds` 秒，插件会把该 UID 标记为已处理但不推送，避免 IMAP 重连、UID 状态异常或服务端返回旧 UID 时刷出历史邮件。默认宽限为 86400 秒；如需更严格或更宽松，可在插件设置中调整：
 

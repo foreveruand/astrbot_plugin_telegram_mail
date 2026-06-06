@@ -224,8 +224,8 @@ def test_oauth2_token_save_keeps_current_stored_refresh_token():
 def test_device_code_token_poll_does_not_send_client_secret(monkeypatch):
     calls = []
 
-    def post_form(url, form, *, client_secret=""):
-        calls.append((url, form, client_secret))
+    def post_form(url, form, *, client_secret="", timeout=15):
+        calls.append((url, form, client_secret, timeout))
         return {"access_token": "access", "refresh_token": "refresh"}
 
     monkeypatch.setattr(

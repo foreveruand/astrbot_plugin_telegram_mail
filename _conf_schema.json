@@ -12,10 +12,22 @@
         "hint": "开启后优先使用 IMAP IDLE 实时获取新邮件；服务端不支持或连接失败时自动回退为定时抓取。账号配置可覆盖该值。"
     },
     "idle_timeout": {
-        "description": "IMAP IDLE 重连间隔(秒)",
+        "description": "IMAP IDLE 单次会话时长(秒)",
         "type": "int",
         "default": 1740,
-        "hint": "账号未设置 idle_timeout 时使用该值。插件内部会分片等待以便及时停止。"
+        "hint": "IMAP RFC 建议 IDLE 命令每约 29 分钟重新建连（1740 秒）。插件将该时长切分为 60 秒一片在 asyncio 层循环，每片结束后释放线程供其他操作使用，避免线程池耗尽。"
+    },
+    "network_timeout": {
+        "description": "邮箱网络超时(秒)",
+        "type": "int",
+        "default": 15,
+        "hint": "IMAP、SMTP 和 OAuth 请求的连接/读写超时。邮箱服务器或网络异常时，插件会在该时间后失败并记录错误，避免长期占用后台线程。"
+    },
+    "max_workers": {
+        "description": "邮箱后台线程数",
+        "type": "int",
+        "default": 4,
+        "hint": "插件使用独立线程池执行阻塞型邮箱网络调用，避免影响 AstrBot WebUI 和其它渠道连接。IDLE 模式已切片化，每 60 秒轮换一次线程，4 个线程通常可应对多个账号并发。账号或文件夹非常多时可适当增加。"
     },
     "imap_folder_mode": {
         "description": "默认 IMAP 文件夹抓取模式",

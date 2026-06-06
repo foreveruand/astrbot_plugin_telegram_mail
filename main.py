@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from email.utils import parseaddr
 from pathlib import Path
@@ -41,6 +42,8 @@ DEFAULT_PREVIEW_LENGTH = 600
 DEFAULT_PAGE_SIZE = 2500
 DEFAULT_MAX_FETCH = 10
 DEFAULT_IDLE_TIMEOUT = 1740
+DEFAULT_NETWORK_TIMEOUT = 15
+DEFAULT_MAX_WORKERS = 4
 DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS = 86400
 IDLE_WAIT_SLICE = 60
 IMAP_FOLDER_MODE_AUTO = "auto"
@@ -255,7 +258,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.8",
+    "0.1.9",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -265,6 +268,11 @@ class TelegramMailPlugin(Star):
         self.mail_client = MailClient(
             self._save_oauth2_token_response,
             self._load_oauth2_token_state,
+            self._config_int("network_timeout", DEFAULT_NETWORK_TIMEOUT),
+        )
+        self.executor = ThreadPoolExecutor(
+            max_workers=max(self._config_int("max_workers", DEFAULT_MAX_WORKERS), 1),
+            thread_name_prefix="telegram-mail",
         )
         data_dir = Path(get_astrbot_plugin_data_path()) / PLUGIN_NAME
         self.store = JsonStore(data_dir, max_tokens=self._config_int("max_tokens", 500))
@@ -281,14 +289,11 @@ class TelegramMailPlugin(Star):
         for account in accounts:
             if not account.enabled:
                 continue
-            folders = await self._resolve_account_folders(account)
             if account.realtime_enabled:
-                for folder in folders:
-                    task = asyncio.create_task(self._watch_folder_loop(account, folder))
-                    self.tasks.append(task)
+                task = asyncio.create_task(self._watch_account_loop(account))
             else:
                 task = asyncio.create_task(self._poll_loop(account))
-                self.tasks.append(task)
+            self.tasks.append(task)
         logger.info("Telegram mail plugin initialized with %s accounts", len(accounts))
 
     async def terminate(self) -> None:
@@ -297,7 +302,32 @@ class TelegramMailPlugin(Star):
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
+        if hasattr(self, "executor"):
+            self.executor.shutdown(wait=False, cancel_futures=True)
         self.store.save()
+
+    async def _run_mail_io(self, func, /, *args, **kwargs):
+        loop = asyncio.get_running_loop()
+        if not hasattr(self, "executor"):
+            self.executor = ThreadPoolExecutor(
+                max_workers=max(
+                    self._config_int("max_workers", DEFAULT_MAX_WORKERS), 1
+                ),
+                thread_name_prefix="telegram-mail",
+            )
+        if kwargs:
+            return await loop.run_in_executor(
+                self.executor,
+                lambda: func(*args, **kwargs),
+            )
+        return await loop.run_in_executor(self.executor, func, *args)
+
+    def _network_timeout(self) -> int:
+        mail_client = getattr(self, "mail_client", None)
+        timeout = getattr(mail_client, "network_timeout", None)
+        if timeout is not None:
+            return max(int(timeout), 1)
+        return max(self._config_int("network_timeout", DEFAULT_NETWORK_TIMEOUT), 1)
 
     @filter.command("mail")
     async def mail_command(self, event: AstrMessageEvent):
@@ -385,6 +415,26 @@ class TelegramMailPlugin(Star):
 
             await self._sleep_poll_interval(account)
 
+    async def _watch_account_loop(self, account: MailAccount) -> None:
+        folder_tasks: list[asyncio.Task] = []
+        try:
+            folders = await self._resolve_account_folders(account)
+            for folder in folders:
+                folder_tasks.append(
+                    asyncio.create_task(self._watch_folder_loop(account, folder))
+                )
+            await asyncio.gather(*folder_tasks)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Mail watcher failed for account %s", account.account_id)
+            self.store.set_last_error(account.owner_id, account.account_id, str(exc))
+            self.store.save()
+        finally:
+            for task in folder_tasks:
+                task.cancel()
+            await asyncio.gather(*folder_tasks, return_exceptions=True)
+
     async def _watch_folder_loop(self, account: MailAccount, folder: str) -> None:
         last_resync = 0.0
         while not self._stop_event.is_set():
@@ -395,14 +445,19 @@ class TelegramMailPlugin(Star):
                     last_resync = time.monotonic()
 
                 self._set_folder_mode(account, folder, "idle")
-                changed = await asyncio.to_thread(
-                    self.mail_client.wait_for_new_mail,
-                    account,
-                    folder,
-                    account.idle_timeout,
-                    IDLE_WAIT_SLICE,
-                    self._thread_stop_event,
-                )
+                changed = False
+                idle_deadline = time.monotonic() + account.idle_timeout
+                while not changed and not self._stop_event.is_set():
+                    if time.monotonic() >= idle_deadline:
+                        break
+                    changed = await self._run_mail_io(
+                        self.mail_client.wait_for_new_mail,
+                        account,
+                        folder,
+                        IDLE_WAIT_SLICE,
+                        IDLE_WAIT_SLICE,
+                        self._thread_stop_event,
+                    )
                 if changed:
                     await self._poll_folder(account, folder, push=True)
                     self.store.clear_last_error(account.owner_id, account.account_id)
@@ -507,7 +562,7 @@ class TelegramMailPlugin(Star):
         push: bool,
     ) -> int:
         total = 0
-        uids = await asyncio.to_thread(self.mail_client.list_uids, account, folder)
+        uids = await self._run_mail_io(self.mail_client.list_uids, account, folder)
         current = set(uids)
         seen = self.store.get_seen(account.owner_id, account.account_id, folder)
         if not self.store.is_initialized(account.owner_id, account.account_id, folder):
@@ -522,7 +577,7 @@ class TelegramMailPlugin(Star):
         new_uids = [uid for uid in uids if uid not in seen]
         max_fetch = self._config_int("max_fetch_per_poll", DEFAULT_MAX_FETCH)
         for uid in new_uids[-max_fetch:]:
-            raw = await asyncio.to_thread(
+            raw = await self._run_mail_io(
                 self.mail_client.fetch_message,
                 account,
                 folder,
@@ -733,7 +788,7 @@ class TelegramMailPlugin(Star):
         op: str,
     ) -> None:
         if op == "archive":
-            await asyncio.to_thread(
+            await self._run_mail_io(
                 self.mail_client.move_message,
                 account,
                 parsed.folder,
@@ -741,14 +796,14 @@ class TelegramMailPlugin(Star):
                 account.archive_folder,
             )
         elif op == "delete":
-            await asyncio.to_thread(
+            await self._run_mail_io(
                 self.mail_client.delete_message,
                 account,
                 parsed.folder,
                 parsed.uid,
             )
         elif op == "read":
-            await asyncio.to_thread(
+            await self._run_mail_io(
                 self.mail_client.mark_seen,
                 account,
                 parsed.folder,
@@ -756,7 +811,7 @@ class TelegramMailPlugin(Star):
                 True,
             )
         elif op == "unread":
-            await asyncio.to_thread(
+            await self._run_mail_io(
                 self.mail_client.mark_seen,
                 account,
                 parsed.folder,
@@ -796,7 +851,7 @@ class TelegramMailPlugin(Star):
             return "用法: /mail send <account_id> <to> | <subject> | <body>"
         to_text, subject, body = fields
         recipients = [item.strip() for item in to_text.split(",") if item.strip()]
-        await asyncio.to_thread(
+        await self._run_mail_io(
             self.mail_client.send_mail,
             account,
             recipients,
@@ -831,7 +886,7 @@ class TelegramMailPlugin(Star):
         subject = parsed.subject
         if not subject.lower().startswith("re:"):
             subject = f"Re: {subject}"
-        await asyncio.to_thread(
+        await self._run_mail_io(
             self.mail_client.send_mail,
             account,
             [parsed.sender_email],
@@ -853,7 +908,7 @@ class TelegramMailPlugin(Star):
         if not account.oauth2_client_id:
             return f"账号 {account.account_id} 缺少 oauth2_client_id。"
 
-        device = await asyncio.to_thread(self._request_device_code, account)
+        device = await self._run_mail_io(self._request_device_code, account)
         task = asyncio.create_task(self._complete_oauth_device_flow(account, device))
         self.tasks.append(task)
 
@@ -880,6 +935,7 @@ class TelegramMailPlugin(Star):
                 "client_id": account.oauth2_client_id,
                 "scope": account.oauth2_scope,
             },
+            timeout=self._network_timeout(),
         )
         if "device_code" not in payload:
             raise RuntimeError("OAuth2 device code response has no device_code")
@@ -895,7 +951,7 @@ class TelegramMailPlugin(Star):
         while time.time() < expires_at and not self._stop_event.is_set():
             await asyncio.sleep(interval)
             try:
-                payload = await asyncio.to_thread(
+                payload = await self._run_mail_io(
                     self._poll_device_token,
                     account,
                     str(device["device_code"]),
@@ -931,6 +987,7 @@ class TelegramMailPlugin(Star):
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                 "device_code": device_code,
             },
+            timeout=self._network_timeout(),
         )
 
     @staticmethod
@@ -939,6 +996,7 @@ class TelegramMailPlugin(Star):
         form: dict[str, str],
         *,
         client_secret: str = "",
+        timeout: int = DEFAULT_NETWORK_TIMEOUT,
     ) -> dict[str, Any]:
         values = {key: value for key, value in form.items() if value}
         if client_secret:
@@ -951,7 +1009,7 @@ class TelegramMailPlugin(Star):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
@@ -1666,7 +1724,7 @@ class TelegramMailPlugin(Star):
             resolved_folders[key] = folders
             return folders
         try:
-            listed = await asyncio.to_thread(self.mail_client.list_folders, account)
+            listed = await self._run_mail_io(self.mail_client.list_folders, account)
         except Exception as exc:
             logger.warning(
                 "Failed to discover IMAP folders for account %s, fallback to configured folders: %s",
