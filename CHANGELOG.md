@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12
+
+- Added `disable_idle_on_error` to stop retrying IMAP IDLE for an account until bot restart after realtime listener errors.
+- Separated realtime resync/follow-up poll failures from IDLE failures in logs, while still falling back to scheduled polling.
+- Updated the registered plugin version to match plugin metadata.
+
 ## 0.1.11
 
 - Retried Outlook OAuth2 IMAP authentication once after transient `AUTHENTICATE failed` errors, clearing the cached access token before retrying.

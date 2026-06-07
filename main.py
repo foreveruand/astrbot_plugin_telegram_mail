@@ -45,6 +45,7 @@ DEFAULT_IDLE_TIMEOUT = 1740
 DEFAULT_NETWORK_TIMEOUT = 15
 DEFAULT_MAX_WORKERS = 4
 DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS = 86400
+DEFAULT_DISABLE_IDLE_ON_ERROR = False
 IDLE_WAIT_SLICE = 60
 IMAP_FOLDER_MODE_AUTO = "auto"
 IMAP_FOLDER_MODE_CONFIGURED = "configured"
@@ -258,7 +259,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.9",
+    "0.1.12",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -281,6 +282,7 @@ class TelegramMailPlugin(Star):
         self._thread_stop_event = threading.Event()
         self.folder_modes: dict[tuple[str, str], str] = {}
         self.resolved_folders: dict[str, list[str]] = {}
+        self.idle_disabled_accounts: set[str] = set()
 
     async def initialize(self) -> None:
         _patch_telegram_callback_edit_message_preview()
@@ -440,9 +442,33 @@ class TelegramMailPlugin(Star):
         while not self._stop_event.is_set():
             try:
                 if time.monotonic() - last_resync >= max(account.poll_interval, 30):
-                    await self._poll_folder(account, folder, push=True)
-                    self.store.clear_last_error(account.owner_id, account.account_id)
-                    last_resync = time.monotonic()
+                    try:
+                        await self._poll_folder(account, folder, push=True)
+                        self.store.clear_last_error(
+                            account.owner_id, account.account_id
+                        )
+                        last_resync = time.monotonic()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.exception(
+                            "Mail resync poll failed for account %s folder %s",
+                            account.account_id,
+                            folder,
+                        )
+                        self._set_folder_mode(account, folder, "polling fallback")
+                        self.store.set_last_error(
+                            account.owner_id, account.account_id, str(exc)
+                        )
+                        self.store.save()
+                        self._disable_idle_for_account(account, str(exc))
+                        await self._sleep_poll_interval(account)
+                        continue
+
+                if self._idle_disabled_for_account(account):
+                    self._set_folder_mode(account, folder, "polling fallback")
+                    await self._sleep_poll_interval(account)
+                    continue
 
                 self._set_folder_mode(account, folder, "idle")
                 changed = False
@@ -459,12 +485,31 @@ class TelegramMailPlugin(Star):
                         self._thread_stop_event,
                     )
                 if changed:
-                    await self._poll_folder(account, folder, push=True)
-                    self.store.clear_last_error(account.owner_id, account.account_id)
-                    last_resync = time.monotonic()
+                    try:
+                        await self._poll_folder(account, folder, push=True)
+                        self.store.clear_last_error(
+                            account.owner_id, account.account_id
+                        )
+                        last_resync = time.monotonic()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.exception(
+                            "Mail IDLE follow-up poll failed for account %s folder %s",
+                            account.account_id,
+                            folder,
+                        )
+                        self._set_folder_mode(account, folder, "polling fallback")
+                        self.store.set_last_error(
+                            account.owner_id, account.account_id, str(exc)
+                        )
+                        self.store.save()
+                        self._disable_idle_for_account(account, str(exc))
+                        await self._sleep_poll_interval(account)
             except asyncio.CancelledError:
                 raise
             except IdleNotSupported:
+                self._disable_idle_for_account(account, "IDLE not supported")
                 self._set_folder_mode(account, folder, "polling fallback")
                 try:
                     await self._poll_folder(account, folder, push=True)
@@ -490,6 +535,7 @@ class TelegramMailPlugin(Star):
                     folder,
                     exc,
                 )
+                self._disable_idle_for_account(account, str(exc))
                 self._set_folder_mode(account, folder, "polling fallback")
                 try:
                     await self._poll_folder(account, folder, push=True)
@@ -519,6 +565,7 @@ class TelegramMailPlugin(Star):
                     account.owner_id, account.account_id, str(exc)
                 )
                 self.store.save()
+                self._disable_idle_for_account(account, str(exc))
                 await self._sleep_poll_interval(account)
 
     async def _sleep_poll_interval(self, account: MailAccount) -> None:
@@ -1715,6 +1762,32 @@ class TelegramMailPlugin(Star):
         if modes == {"idle"}:
             return "idle"
         return ", ".join(sorted(modes))
+
+    def _idle_disabled_for_account(self, account: MailAccount) -> bool:
+        return self._account_state_key(account) in self._idle_disabled_account_keys()
+
+    def _disable_idle_for_account(self, account: MailAccount, reason: str) -> None:
+        if not self._config_bool(
+            "disable_idle_on_error",
+            DEFAULT_DISABLE_IDLE_ON_ERROR,
+        ):
+            return
+        key = self._account_state_key(account)
+        disabled = self._idle_disabled_account_keys()
+        if key in disabled:
+            return
+        disabled.add(key)
+        self._set_account_mode(account, "polling fallback")
+        logger.warning(
+            "Disabled IMAP IDLE for account %s until bot restart: %s",
+            account.account_id,
+            reason or "-",
+        )
+
+    def _idle_disabled_account_keys(self) -> set[str]:
+        if not hasattr(self, "idle_disabled_accounts"):
+            self.idle_disabled_accounts = set()
+        return self.idle_disabled_accounts
 
     async def _resolve_account_folders(self, account: MailAccount) -> list[str]:
         key = self._account_state_key(account)

@@ -107,14 +107,15 @@ Microsoft access token 通常是短期有效，refresh token 因为请求了 `of
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 
-`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒；插件内部会将该时长切成 60 秒一片执行，每片结束后释放后台线程，避免多个 IDLE 文件夹长期占满线程池。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
+`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒；插件内部会将该时长切成 60 秒一片执行，每片结束后释放后台线程，避免多个 IDLE 文件夹长期占满线程池。若部分邮箱服务商频繁断开或拒绝 IDLE，可开启 `disable_idle_on_error`；开启后同一账号在本次 Bot 启动期间只要出现实时监听相关错误，就会记录日志并停止继续尝试该账号的 IDLE，直到 Bot 重启后再恢复尝试。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
 
 插件会把 IMAP、SMTP 和 OAuth 等阻塞型邮箱网络调用放在独立线程池中执行，避免邮箱服务器或网络异常时占用 AstrBot 默认线程资源并影响 WebUI 或其它渠道连接。默认邮箱网络超时为 15 秒，默认后台线程数为 4；如账号或自动发现文件夹较多，可在插件设置中调整：
 
 ```json
 {
   "network_timeout": 15,
-  "max_workers": 4
+  "max_workers": 4,
+  "disable_idle_on_error": false
 }
 ```
 

@@ -17,6 +17,12 @@
         "default": 1740,
         "hint": "IMAP RFC 建议 IDLE 命令每约 29 分钟重新建连（1740 秒）。插件将该时长切分为 60 秒一片在 asyncio 层循环，每片结束后释放线程供其他操作使用，避免线程池耗尽。"
     },
+    "disable_idle_on_error": {
+        "description": "IDLE 出错后本次启动停用该账号 IDLE",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，账号的 IDLE 或实时监听相关同步出现错误时，插件会记录日志，并在 Bot 重启前不再尝试该账号的 IMAP IDLE，改用 poll_interval 定时抓取。"
+    },
     "network_timeout": {
         "description": "邮箱网络超时(秒)",
         "type": "int",
