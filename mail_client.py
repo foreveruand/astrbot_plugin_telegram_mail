@@ -508,13 +508,23 @@ class MailClient:
         lower = detail.lower()
         if account.imap_auth_type == "oauth2" and (
             "authenticated but not connected" in lower
-            or "authenticate failed" in lower
-            or "authentication failed" in lower
+        ):
+            return (
+                f"账号 {account.owner_id}/{account.account_id} ({account.imap_user}) "
+                "的 Outlook IMAP OAuth2 会话建立失败，插件已重试一次。"
+                "这通常是 Outlook IMAP 临时连接或会话限制问题；请先重试，"
+                "必要时减少监听文件夹或关闭实时监听。"
+                f"原始错误: {detail}"
+            )
+        if account.imap_auth_type == "oauth2" and (
+            "authenticate failed" in lower or "authentication failed" in lower
         ):
             return (
                 f"账号 {account.owner_id}/{account.account_id} ({account.imap_user}) "
                 "的 IMAP OAuth2 登录暂时失败，插件已重试一次。"
-                f"如果持续出现，请执行 /mail oauth {account.account_id} 重新授权。"
+                "请先重试，必要时减少监听文件夹或关闭实时监听；"
+                "只有 OAuth2 token 刷新明确提示 invalid_grant 或 AADSTS 过期时，"
+                f"再执行 /mail oauth {account.account_id} 重新授权。"
                 f"原始错误: {detail}"
             )
         if isinstance(exc, (TimeoutError, OSError)):

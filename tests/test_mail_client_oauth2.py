@@ -400,6 +400,8 @@ def test_imap_oauth2_repeated_not_connected_error_is_readable(monkeypatch):
         MailClient()._imap(_account())
 
     message = str(exc_info.value)
-    assert "IMAP OAuth2 登录暂时失败" in message
-    assert "/mail oauth outlook" in message
+    assert "Outlook IMAP OAuth2 会话建立失败" in message
+    assert "请先重试" in message
+    assert "减少监听文件夹或关闭实时监听" in message
+    assert "/mail oauth outlook" not in message
     assert "User is authenticated but not connected" in message

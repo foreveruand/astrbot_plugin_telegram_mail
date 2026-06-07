@@ -1,12 +1,12 @@
 # Telegram Mail Plugin
 
-专用于 Telegram 的 AstrBot 邮箱助手插件，优先使用 IMAP IDLE 实时监听新邮件，不支持时自动回退为定时轮询，并通过 Telegram inline button 展示附件、全文分页和常用邮件操作。
+专用于 Telegram 的 AstrBot 邮箱助手插件，支持 IMAP IDLE 或定时轮询检查新邮件，并通过 Telegram inline button 展示附件、全文分页和常用邮件操作。
 
 ## 功能
 
 - 多邮箱账号配置，按 Telegram 用户 ID 独立保存。
-- IMAP IDLE 实时监听新邮件并推送到指定 Telegram `chat_id`。
-- 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询。
+- IMAP IDLE 或定时轮询检查新邮件并推送到指定 Telegram `chat_id`。
+- 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询；Outlook/OAuth2 账号实时模式固定使用账号级轮询，避免多个文件夹同时维持 IMAP IDLE 会话。
 - IMAP、SMTP、OAuth 的常见网络或认证异常会转换为可读错误；后台可恢复错误只记录 warning，并可在 `/mail status` 中查看最近错误。
 - 邮件卡片使用 Telegram Markdown 展示主题、发件人、时间和正文预览，并会转义邮件动态内容，避免格式被邮件正文破坏。
 - 附件直接显示在主邮件卡片按钮上，点击后按需发送对应附件；旧的 `Attachments` 回调入口仍保留兼容。
@@ -102,13 +102,15 @@ Outlook 示例：
 - `configured`：只抓取 `imap_folders` 中配置的文件夹。Gmail、QQ 等非 Outlook 账号默认使用该模式，保持旧行为。
 - `auto`：通过 IMAP `LIST` 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Deleted Items、Junk、Spam、Archive、Outbox、Sync Issues、Gmail All Mail 等非收件或容易重复的文件夹。自动发现失败时会回退到 `imap_folders`，避免账号不可用。
 
-Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。OAuth2 access token 缓存和刷新锁会按用户、账号 ID、邮箱地址隔离，避免不同用户使用相同 `account_id` 时串用 token；完成 `/mail oauth <account_id>` 授权后也会清除旧 access-token 缓存。OAuth2 access token 过期时，同一账号的刷新请求会按账号加锁串行执行，避免并发线程重复使用 Microsoft 单次 refresh token。Outlook/OAuth2 账号的邮件轮询与 IDLE 等待会按账号串行执行，降低自动发现多个文件夹时同时打开多条 OAuth IMAP 会话导致的登录失败。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed` 或 `User is authenticated but not connected`，插件会清除该账号的 access token 缓存并自动重试一次；如果重试后仍失败，后台日志会输出可读 warning，并在 `/mail status` 显示重新执行 `/mail oauth <account_id>` 的提示。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
+Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。OAuth2 access token 缓存和刷新锁会按用户、账号 ID、邮箱地址隔离，避免不同用户使用相同 `account_id` 时串用 token；完成 `/mail oauth <account_id>` 授权后也会清除旧 access-token 缓存。OAuth2 access token 过期时，同一账号的刷新请求会按账号加锁串行执行，避免并发线程重复使用 Microsoft 单次 refresh token。
+
+Outlook/OAuth2 账号即使开启 `realtime_enabled`，也不会为每个文件夹创建 IMAP IDLE watcher，而是按账号执行一次轮询，串行扫描解析后的所有文件夹，然后按 `poll_interval` 休眠；`/mail status` 中会显示 `mode=oauth2 polling`。这个模式牺牲 IMAP IDLE 的即时性，换取多文件夹和多个 Outlook 账号下更稳定的 OAuth2 IMAP 连接。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed` 或 `User is authenticated but not connected`，插件会清除该账号的 access token 缓存并自动重试一次；如果重试后仍失败，后台日志会输出可读 warning，并在 `/mail status` 建议先重试、减少监听文件夹或关闭实时监听。若错误显示 `invalid_grant`、`AADSTS700082` 或其它明确的 AADSTS token 过期/撤销信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，此时需要重新执行 `/mail oauth <account_id>`。Microsoft Graph message delta 是后续更稳定的多文件夹增量同步方向，但当前版本仍继续使用 IMAP/SMTP OAuth2，不新增 Graph 依赖或权限。
 
 插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 
-`realtime_enabled` 默认开启。开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。`idle_timeout` 用于定期刷新 IDLE 连接，账号未配置时默认 1740 秒；插件内部会将该时长切成 60 秒一片执行，每片结束后释放后台线程，避免多个 IDLE 文件夹长期占满线程池。若部分邮箱服务商频繁断开或拒绝 IDLE，可开启 `disable_idle_on_error`；开启后同一账号在本次 Bot 启动期间只要出现实时监听相关错误，就会记录日志并停止继续尝试该账号的 IDLE，直到 Bot 重启后再恢复尝试。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
+`realtime_enabled` 默认开启。密码账号开启后插件会为解析后的监听文件夹尝试使用 IMAP IDLE；如果服务端不支持或监听失败，会按 `poll_interval` 定时抓取。Outlook/OAuth2 账号开启后使用账号级轮询，不使用多文件夹 IDLE。`idle_timeout` 用于密码账号定期刷新 IDLE 连接，账号未配置时默认 1740 秒；插件内部会将该时长切成 60 秒一片执行，每片结束后释放后台线程，避免多个 IDLE 文件夹长期占满线程池。若部分邮箱服务商频繁断开或拒绝 IDLE，可开启 `disable_idle_on_error`；开启后同一账号在本次 Bot 启动期间只要出现实时监听相关错误，就会记录日志并停止继续尝试该账号的 IDLE，直到 Bot 重启后再恢复尝试。`/mail status` 会显示当前 `folder_mode` 和解析后的文件夹摘要。
 
 插件会把 IMAP、SMTP 和 OAuth 等阻塞型邮箱网络调用放在独立线程池中执行，避免邮箱服务器或网络异常时占用 AstrBot 默认线程资源并影响 WebUI 或其它渠道连接。默认邮箱网络超时为 15 秒，默认后台线程数为 4；如账号或自动发现文件夹较多，可在插件设置中调整：
 

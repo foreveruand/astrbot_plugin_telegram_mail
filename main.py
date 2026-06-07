@@ -264,7 +264,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.13",
+    "0.1.14",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -297,7 +297,9 @@ class TelegramMailPlugin(Star):
         for account in accounts:
             if not account.enabled:
                 continue
-            if account.realtime_enabled:
+            if account.realtime_enabled and self._uses_oauth2_realtime_polling(account):
+                task = asyncio.create_task(self._watch_oauth2_account_loop(account))
+            elif account.realtime_enabled:
                 task = asyncio.create_task(self._watch_account_loop(account))
             else:
                 task = asyncio.create_task(self._poll_loop(account))
@@ -456,6 +458,29 @@ class TelegramMailPlugin(Star):
             for task in folder_tasks:
                 task.cancel()
             await asyncio.gather(*folder_tasks, return_exceptions=True)
+
+    async def _watch_oauth2_account_loop(self, account: MailAccount) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._set_account_mode(account, "oauth2 polling")
+                await self._poll_account(account, push=True)
+                self.store.clear_last_error(account.owner_id, account.account_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._log_mail_error(
+                    exc,
+                    "Mail OAuth2 poll failed for owner %s account %s user %s",
+                    account.owner_id,
+                    account.account_id,
+                    account.imap_user,
+                )
+                self.store.set_last_error(
+                    account.owner_id, account.account_id, str(exc)
+                )
+                self.store.save()
+
+            await self._sleep_poll_interval(account)
 
     async def _watch_folder_loop(self, account: MailAccount, folder: str) -> None:
         last_resync = 0.0
@@ -617,7 +642,25 @@ class TelegramMailPlugin(Star):
         total = 0
         for account in accounts:
             if account.enabled:
-                total += await self._poll_account(account, push=True)
+                try:
+                    total += await self._poll_account(account, push=True)
+                    self.store.clear_last_error(account.owner_id, account.account_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    if account_id:
+                        raise
+                    self._log_mail_error(
+                        exc,
+                        "Mail check failed for owner %s account %s user %s",
+                        account.owner_id,
+                        account.account_id,
+                        account.imap_user,
+                    )
+                    self.store.set_last_error(
+                        account.owner_id, account.account_id, str(exc)
+                    )
+                    self.store.save()
         return total
 
     async def _poll_account(self, account: MailAccount, *, push: bool) -> int:
@@ -628,8 +671,31 @@ class TelegramMailPlugin(Star):
 
     async def _poll_account_unlocked(self, account: MailAccount, *, push: bool) -> int:
         total = 0
+        errors: list[tuple[str, Exception]] = []
         for folder in await self._resolve_account_folders(account):
-            total += await self._poll_folder_unlocked(account, folder, push=push)
+            try:
+                total += await self._poll_folder_unlocked(account, folder, push=push)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                errors.append((folder, exc))
+                self._log_mail_error(
+                    exc,
+                    "Mail folder poll failed for owner %s account %s user %s folder %s",
+                    account.owner_id,
+                    account.account_id,
+                    account.imap_user,
+                    folder,
+                )
+                self.store.set_last_error(
+                    account.owner_id,
+                    account.account_id,
+                    f"{folder}: {exc}",
+                )
+                self.store.save()
+        if errors:
+            folder, exc = errors[0]
+            raise RuntimeError(f"{folder}: {exc}") from exc
         return total
 
     async def _poll_folder(
@@ -1817,6 +1883,8 @@ class TelegramMailPlugin(Star):
             return "-"
         if not account.realtime_enabled:
             return "polling"
+        if self._uses_oauth2_realtime_polling(account):
+            return "oauth2 polling"
         folders = self._cached_account_folders(account)
         modes = {
             self.folder_modes.get(
@@ -1983,6 +2051,9 @@ class TelegramMailPlugin(Star):
         return f"{account.owner_id}:{account.account_id}:{account.imap_user.casefold()}"
 
     def _serializes_account_mail_io(self, account: MailAccount) -> bool:
+        return account.imap_auth_type == "oauth2"
+
+    def _uses_oauth2_realtime_polling(self, account: MailAccount) -> bool:
         return account.imap_auth_type == "oauth2"
 
     def _account_mail_lock(self, account: MailAccount) -> asyncio.Lock:

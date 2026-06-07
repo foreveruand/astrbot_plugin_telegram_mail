@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.14
+
+- Changed Outlook/OAuth2 realtime mail checks to account-level polling instead of per-folder IMAP IDLE watchers, avoiding long IDLE waits blocking the same OAuth2 account.
+- Kept OAuth2 IMAP access serialized per account while continuing to scan later folders when one folder fails.
+- Allowed `/mail check` across multiple accounts to continue after one account fails, recording the failed account in `/mail status`.
+- Updated repeated Outlook `User is authenticated but not connected` errors to recommend retrying or reducing realtime folder pressure before reauthorization; `/mail oauth` is reserved for explicit token expiry or `invalid_grant` cases.
+
 ## 0.1.13
 
 - Added readable recoverable error handling for IMAP, SMTP, and OAuth network/authentication failures.
