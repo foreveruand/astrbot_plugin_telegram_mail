@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.13
+
+- Added readable recoverable error handling for IMAP, SMTP, and OAuth network/authentication failures.
+- Downgraded recoverable background mail connection failures from traceback logs to warning logs while keeping `/mail status` error details.
+- Improved repeated Outlook OAuth2 IMAP `User is authenticated but not connected` failures with a clear reauthorization hint.
+- Scoped OAuth2 access-token caches and refresh locks by owner, account, and mailbox address to avoid cross-user/account token reuse.
+- Serialized Outlook/OAuth2 IMAP polling and IDLE waits per account to reduce concurrent login failures across auto-discovered folders.
+
 ## 0.1.12
 
 - Added `disable_idle_on_error` to stop retrying IMAP IDLE for an account until bot restart after realtime listener errors.

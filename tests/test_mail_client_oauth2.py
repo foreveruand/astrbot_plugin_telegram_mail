@@ -3,7 +3,7 @@ import urllib.error
 import urllib.parse
 
 import pytest
-from astrbot_plugin_telegram_mail.mail_client import MailClient
+from astrbot_plugin_telegram_mail.mail_client import MailClient, MailConnectionError
 from astrbot_plugin_telegram_mail.models import MailAccount
 
 
@@ -109,6 +109,51 @@ def test_oauth2_access_token_uses_loader_state():
     assert (
         client._oauth2_access_token(_account(oauth2_access_token="")) == "stored-access"
     )
+
+
+def test_oauth2_access_token_cache_is_scoped_by_owner_and_mailbox():
+    client = MailClient(
+        oauth2_token_loader=lambda account: {
+            "access_token": f"stored-{account.owner_id}-{account.imap_user}",
+            "refresh_token": "",
+            "expires_at": 9999999999.0,
+        }
+    )
+
+    first = _account(owner_id="u1", account_id="outlook", imap_user="a@example.com")
+    second = _account(owner_id="u2", account_id="outlook", imap_user="b@example.com")
+
+    assert client._oauth2_access_token(first) == "stored-u1-a@example.com"
+    assert client._oauth2_access_token(second) == "stored-u2-b@example.com"
+    assert len(client._oauth2_cache) == 2
+    assert len(client._oauth2_refresh_locks) == 2
+
+
+def test_oauth2_cache_invalidation_clears_only_matching_account():
+    tokens = {
+        ("u1", "a@example.com"): "old-a",
+        ("u2", "b@example.com"): "old-b",
+    }
+
+    def loader(account):
+        return {
+            "access_token": tokens[(account.owner_id, account.imap_user)],
+            "refresh_token": "",
+            "expires_at": 9999999999.0,
+        }
+
+    client = MailClient(oauth2_token_loader=loader)
+    first = _account(owner_id="u1", account_id="outlook", imap_user="a@example.com")
+    second = _account(owner_id="u2", account_id="outlook", imap_user="b@example.com")
+    assert client._oauth2_access_token(first) == "old-a"
+    assert client._oauth2_access_token(second) == "old-b"
+
+    tokens[("u1", "a@example.com")] = "new-a"
+    tokens[("u2", "b@example.com")] = "new-b"
+    client.invalidate_oauth2_cache(first)
+
+    assert client._oauth2_access_token(first) == "new-a"
+    assert client._oauth2_access_token(second) == "old-b"
 
 
 def test_oauth2_refresh_updates_persistent_state(monkeypatch):
@@ -329,3 +374,32 @@ def test_imap_oauth2_authenticate_failed_retries_with_fresh_token(monkeypatch):
         b"user=user@outlook.com\x01auth=Bearer fresh-1\x01\x01",
     ]
     assert sleeps == [2]
+
+
+def test_imap_oauth2_repeated_not_connected_error_is_readable(monkeypatch):
+    class Client:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def authenticate(self, mechanism, authobject):
+            raise imaplib.IMAP4.error("User is authenticated but not connected.")
+
+        def logout(self):
+            return None
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.imaplib.IMAP4_SSL",
+        Client,
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.time.sleep",
+        lambda seconds: None,
+    )
+
+    with pytest.raises(MailConnectionError) as exc_info:
+        MailClient()._imap(_account())
+
+    message = str(exc_info.value)
+    assert "IMAP OAuth2 登录暂时失败" in message
+    assert "/mail oauth outlook" in message
+    assert "User is authenticated but not connected" in message

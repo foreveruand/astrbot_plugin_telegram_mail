@@ -7,6 +7,7 @@
 - 多邮箱账号配置，按 Telegram 用户 ID 独立保存。
 - IMAP IDLE 实时监听新邮件并推送到指定 Telegram `chat_id`。
 - 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询。
+- IMAP、SMTP、OAuth 的常见网络或认证异常会转换为可读错误；后台可恢复错误只记录 warning，并可在 `/mail status` 中查看最近错误。
 - 邮件卡片使用 Telegram Markdown 展示主题、发件人、时间和正文预览，并会转义邮件动态内容，避免格式被邮件正文破坏。
 - 附件直接显示在主邮件卡片按钮上，点击后按需发送对应附件；旧的 `Attachments` 回调入口仍保留兼容。
 - `More` 按钮展示全文并支持 Prev/Next 翻页。
@@ -101,7 +102,7 @@ Outlook 示例：
 - `configured`：只抓取 `imap_folders` 中配置的文件夹。Gmail、QQ 等非 Outlook 账号默认使用该模式，保持旧行为。
 - `auto`：通过 IMAP `LIST` 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Deleted Items、Junk、Spam、Archive、Outbox、Sync Issues、Gmail All Mail 等非收件或容易重复的文件夹。自动发现失败时会回退到 `imap_folders`，避免账号不可用。
 
-Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。OAuth2 access token 过期时，同一账号的刷新请求会按账号加锁串行执行，避免并发线程重复使用 Microsoft 单次 refresh token。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed` 或 `User is authenticated but not connected`，插件会清除该账号的 access token 缓存并自动重试一次。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
+Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。OAuth2 access token 缓存和刷新锁会按用户、账号 ID、邮箱地址隔离，避免不同用户使用相同 `account_id` 时串用 token；完成 `/mail oauth <account_id>` 授权后也会清除旧 access-token 缓存。OAuth2 access token 过期时，同一账号的刷新请求会按账号加锁串行执行，避免并发线程重复使用 Microsoft 单次 refresh token。Outlook/OAuth2 账号的邮件轮询与 IDLE 等待会按账号串行执行，降低自动发现多个文件夹时同时打开多条 OAuth IMAP 会话导致的登录失败。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed` 或 `User is authenticated but not connected`，插件会清除该账号的 access token 缓存并自动重试一次；如果重试后仍失败，后台日志会输出可读 warning，并在 `/mail status` 显示重新执行 `/mail oauth <account_id>` 的提示。若 `/mail status` 里的错误显示 `invalid_grant`、`AADSTS700082` 或其它 AADSTS 信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，也需要重新授权。
 
 插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
 

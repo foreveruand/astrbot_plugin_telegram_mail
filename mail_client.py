@@ -26,6 +26,10 @@ class MailIdleDisconnected(RuntimeError):
     pass
 
 
+class MailConnectionError(RuntimeError):
+    pass
+
+
 _IDLE_DISCONNECT_ERRORS = (
     imaplib.IMAP4.abort,
     BrokenPipeError,
@@ -177,41 +181,50 @@ class MailClient:
 
         if account.smtp_tls == "ssl":
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(
-                account.smtp_host,
-                account.smtp_port,
-                context=context,
-                timeout=self.network_timeout,
-            ) as client:
-                self._smtp_login(client, account)
-                client.send_message(message)
+            try:
+                with smtplib.SMTP_SSL(
+                    account.smtp_host,
+                    account.smtp_port,
+                    context=context,
+                    timeout=self.network_timeout,
+                ) as client:
+                    self._smtp_login(client, account)
+                    client.send_message(message)
+            except (OSError, smtplib.SMTPException) as exc:
+                raise MailConnectionError(
+                    self._format_smtp_error(account, exc)
+                ) from exc
             return
 
-        with smtplib.SMTP(
-            account.smtp_host,
-            account.smtp_port,
-            timeout=self.network_timeout,
-        ) as client:
-            if account.smtp_tls == "starttls":
-                client.starttls(context=ssl.create_default_context())
-            self._smtp_login(client, account)
-            client.send_message(message)
+        try:
+            with smtplib.SMTP(
+                account.smtp_host,
+                account.smtp_port,
+                timeout=self.network_timeout,
+            ) as client:
+                if account.smtp_tls == "starttls":
+                    client.starttls(context=ssl.create_default_context())
+                self._smtp_login(client, account)
+                client.send_message(message)
+        except (OSError, smtplib.SMTPException) as exc:
+            raise MailConnectionError(self._format_smtp_error(account, exc)) from exc
 
     def _imap(self, account: MailAccount):
         for attempt in range(2):
-            if account.imap_tls:
-                client = imaplib.IMAP4_SSL(
-                    account.imap_host,
-                    account.imap_port,
-                    timeout=self.network_timeout,
-                )
-            else:
-                client = imaplib.IMAP4(
-                    account.imap_host,
-                    account.imap_port,
-                    timeout=self.network_timeout,
-                )
+            client = None
             try:
+                if account.imap_tls:
+                    client = imaplib.IMAP4_SSL(
+                        account.imap_host,
+                        account.imap_port,
+                        timeout=self.network_timeout,
+                    )
+                else:
+                    client = imaplib.IMAP4(
+                        account.imap_host,
+                        account.imap_port,
+                        timeout=self.network_timeout,
+                    )
                 if account.imap_auth_type == "oauth2":
                     client.authenticate(
                         "XOAUTH2",
@@ -223,11 +236,12 @@ class MailClient:
                 else:
                     client.login(account.imap_user, account.imap_password)
                 return _ImapContext(client)
-            except imaplib.IMAP4.error as exc:
-                try:
-                    client.logout()
-                except Exception:
-                    pass
+            except (OSError, imaplib.IMAP4.error, MailConnectionError) as exc:
+                if client is not None:
+                    try:
+                        client.logout()
+                    except Exception:
+                        pass
                 err_msg = str(exc).lower()
                 if (
                     attempt == 0
@@ -240,16 +254,20 @@ class MailClient:
                     # server is rate-limiting.  Clear the token cache so the retry
                     # fetches a fresh token, then wait briefly for the server to
                     # release the previous session.
-                    self._oauth2_cache.pop(account.account_id, None)
+                    self.invalidate_oauth2_cache(account)
                     time.sleep(2)
                     continue
-                raise
+                if isinstance(exc, MailConnectionError):
+                    raise
+                raise MailConnectionError(
+                    self._format_imap_error(account, exc)
+                ) from exc
+        raise MailConnectionError(f"账号 {account.account_id} 的 IMAP 连接失败。")
 
-    @staticmethod
-    def _select_folder(client: imaplib.IMAP4, folder: str) -> None:
+    def _select_folder(self, client: imaplib.IMAP4, folder: str) -> None:
         status, _ = client.select(folder)
         if status != "OK":
-            raise RuntimeError(f"Failed to select IMAP folder: {folder}")
+            raise MailConnectionError(f"无法选择 IMAP 文件夹 {folder}。")
 
     @staticmethod
     def _parse_list_folder_name(line: str) -> str:
@@ -303,8 +321,15 @@ class MailClient:
     def _xoauth2_string(user: str, access_token: str) -> bytes:
         return f"user={user}\x01auth=Bearer {access_token}\x01\x01".encode("ascii")
 
+    def invalidate_oauth2_cache(self, account: MailAccount) -> None:
+        self._oauth2_cache.pop(self._oauth2_cache_key(account), None)
+
+    @staticmethod
+    def _oauth2_cache_key(account: MailAccount) -> str:
+        return f"{account.owner_id}:{account.account_id}:{account.imap_user.casefold()}"
+
     def _oauth2_access_token(self, account: MailAccount) -> str:
-        cache_key = account.account_id
+        cache_key = self._oauth2_cache_key(account)
         # Fast path: no lock needed for a cache hit.
         cached = self._oauth2_cache.get(cache_key)
         if cached and cached[1] > time.time() + 60:
@@ -341,12 +366,12 @@ class MailClient:
             if access_token and not refresh_token:
                 return access_token
             if not refresh_token:
-                raise RuntimeError(
-                    f"OAuth2 account {account.account_id} is not authorized; run /mail oauth {account.account_id}"
+                raise MailConnectionError(
+                    f"账号 {account.account_id} 尚未完成 OAuth2 授权，请执行 /mail oauth {account.account_id}。"
                 )
             if not account.oauth2_client_id:
-                raise RuntimeError(
-                    f"OAuth2 account {account.account_id} is missing oauth2_client_id"
+                raise MailConnectionError(
+                    f"账号 {account.account_id} 缺少 oauth2_client_id。"
                 )
 
             form = {
@@ -375,19 +400,26 @@ class MailClient:
                 try:
                     error_payload = json.loads(body)
                 except json.JSONDecodeError:
-                    raise RuntimeError(
-                        f"OAuth2 token refresh failed for {account.account_id}: HTTP {exc.code}"
+                    raise MailConnectionError(
+                        f"账号 {account.account_id} 的 OAuth2 token 刷新失败: HTTP {exc.code}。"
                     ) from exc
                 error = str(error_payload.get("error") or "")
                 description = str(error_payload.get("error_description") or error)
-                raise RuntimeError(
-                    f"OAuth2 token refresh failed for {account.account_id}: "
-                    f"HTTP {exc.code} {description}"
+                hint = ""
+                if error == "invalid_grant" or "AADSTS700082" in description:
+                    hint = f" 请执行 /mail oauth {account.account_id} 重新授权。"
+                raise MailConnectionError(
+                    f"账号 {account.account_id} 的 OAuth2 token 刷新失败: "
+                    f"HTTP {exc.code} {description}{hint}"
+                ) from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                raise MailConnectionError(
+                    f"账号 {account.account_id} 的 OAuth2 token 刷新请求失败: {self._short_error(exc)}。"
                 ) from exc
             access_token = str(payload.get("access_token") or "")
             if not access_token:
-                raise RuntimeError(
-                    f"OAuth2 token response for {account.account_id} has no access_token"
+                raise MailConnectionError(
+                    f"账号 {account.account_id} 的 OAuth2 token 响应缺少 access_token。"
                 )
             expires_in = int(payload.get("expires_in") or 3600)
             expires_at = time.time() + expires_in
@@ -469,6 +501,42 @@ class MailClient:
                 if b" OK" not in upper:
                     raise RuntimeError(f"Failed to end IMAP IDLE: {line!r}")
                 return
+
+    @classmethod
+    def _format_imap_error(cls, account: MailAccount, exc: BaseException) -> str:
+        detail = cls._short_error(exc)
+        lower = detail.lower()
+        if account.imap_auth_type == "oauth2" and (
+            "authenticated but not connected" in lower
+            or "authenticate failed" in lower
+            or "authentication failed" in lower
+        ):
+            return (
+                f"账号 {account.owner_id}/{account.account_id} ({account.imap_user}) "
+                "的 IMAP OAuth2 登录暂时失败，插件已重试一次。"
+                f"如果持续出现，请执行 /mail oauth {account.account_id} 重新授权。"
+                f"原始错误: {detail}"
+            )
+        if isinstance(exc, (TimeoutError, OSError)):
+            return (
+                f"账号 {account.account_id} 连接 IMAP 服务器 {account.imap_host}:{account.imap_port} 失败: "
+                f"{detail}"
+            )
+        return f"账号 {account.account_id} 的 IMAP 操作失败: {detail}"
+
+    @classmethod
+    def _format_smtp_error(cls, account: MailAccount, exc: BaseException) -> str:
+        detail = cls._short_error(exc)
+        return (
+            f"账号 {account.account_id} 连接 SMTP 服务器 {account.smtp_host}:{account.smtp_port} 失败: "
+            f"{detail}"
+        )
+
+    @staticmethod
+    def _short_error(exc: BaseException) -> str:
+        if isinstance(exc, urllib.error.URLError) and exc.reason:
+            return str(exc.reason)
+        return str(exc).strip() or exc.__class__.__name__
 
 
 class _ImapContext:

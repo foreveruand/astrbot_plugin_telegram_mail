@@ -4,6 +4,7 @@ from astrbot_plugin_telegram_mail.main import (
     IMAP_FOLDER_MODE_CONFIGURED,
     TelegramMailPlugin,
 )
+from astrbot_plugin_telegram_mail.mail_client import MailClient
 
 
 def _plugin(config=None):
@@ -219,6 +220,47 @@ def test_oauth2_token_save_keeps_current_stored_refresh_token():
     )
 
     assert states[("u1", "a1")]["refresh_token"] == "stored-refresh"
+
+
+def test_oauth2_token_save_invalidates_access_token_cache():
+    states = {
+        ("u1", "a1"): {
+            "access_token": "old-access",
+            "refresh_token": "stored-refresh",
+            "expires_at": 9999999999.0,
+        }
+    }
+
+    class Store:
+        def get_oauth2_state(self, owner_id, account_id):
+            return states.get((owner_id, account_id), {})
+
+        def set_oauth2_state(self, owner_id, account_id, payload):
+            states[(owner_id, account_id)] = payload
+
+        def save(self):
+            return None
+
+    plugin = _plugin()
+    plugin.store = Store()
+    plugin.mail_client = MailClient(oauth2_token_loader=plugin._load_oauth2_token_state)
+    account = plugin._parse_account(
+        _account_config(
+            auth_type="oauth2",
+            imap_password="",
+            oauth2_client_id="client-id",
+        ),
+        "u1",
+    )
+
+    assert plugin.mail_client._oauth2_access_token(account) == "old-access"
+
+    plugin._save_oauth2_token_response(
+        account,
+        {"access_token": "new-access", "expires_in": 3600},
+    )
+
+    assert plugin.mail_client._oauth2_access_token(account) == "new-access"
 
 
 def test_device_code_token_poll_does_not_send_client_secret(monkeypatch):

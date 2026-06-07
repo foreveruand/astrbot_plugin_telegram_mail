@@ -31,7 +31,12 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 
-from .mail_client import IdleNotSupported, MailClient, MailIdleDisconnected
+from .mail_client import (
+    IdleNotSupported,
+    MailClient,
+    MailConnectionError,
+    MailIdleDisconnected,
+)
 from .models import MailAccount, ParsedMail
 from .parser import extract_attachment_payload, parse_message
 from .storage import JsonStore
@@ -259,7 +264,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.12",
+    "0.1.13",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -283,6 +288,7 @@ class TelegramMailPlugin(Star):
         self.folder_modes: dict[tuple[str, str], str] = {}
         self.resolved_folders: dict[str, list[str]] = {}
         self.idle_disabled_accounts: set[str] = set()
+        self._account_mail_locks: dict[str, asyncio.Lock] = {}
 
     async def initialize(self) -> None:
         _patch_telegram_callback_edit_message_preview()
@@ -366,6 +372,9 @@ class TelegramMailPlugin(Star):
                 yield event.plain_result(self._cmd_unblock(args[1:], owner_id))
             else:
                 yield event.plain_result(self._help_text())
+        except MailConnectionError as exc:
+            logger.warning("Telegram mail command failed: %s", exc)
+            yield event.plain_result(f"执行失败: {exc}")
         except Exception as exc:
             logger.exception("Telegram mail command failed")
             yield event.plain_result(f"执行失败: {exc}")
@@ -394,6 +403,9 @@ class TelegramMailPlugin(Star):
 
         try:
             await self._handle_mail_callback(event, token, op, parts[3:], payload)
+        except MailConnectionError as exc:
+            logger.warning("Telegram mail callback failed: %s", exc)
+            await event.answer_callback_query(f"操作失败: {exc}", show_alert=True)
         except Exception as exc:
             logger.exception("Telegram mail callback failed")
             await event.answer_callback_query(f"操作失败: {exc}", show_alert=True)
@@ -409,7 +421,11 @@ class TelegramMailPlugin(Star):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.exception("Mail poll failed for account %s", account.account_id)
+                self._log_mail_error(
+                    exc,
+                    "Mail poll failed for account %s",
+                    account.account_id,
+                )
                 self.store.set_last_error(
                     account.owner_id, account.account_id, str(exc)
                 )
@@ -429,7 +445,11 @@ class TelegramMailPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.exception("Mail watcher failed for account %s", account.account_id)
+            self._log_mail_error(
+                exc,
+                "Mail watcher failed for account %s",
+                account.account_id,
+            )
             self.store.set_last_error(account.owner_id, account.account_id, str(exc))
             self.store.save()
         finally:
@@ -451,7 +471,8 @@ class TelegramMailPlugin(Star):
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        logger.exception(
+                        self._log_mail_error(
+                            exc,
                             "Mail resync poll failed for account %s folder %s",
                             account.account_id,
                             folder,
@@ -476,14 +497,7 @@ class TelegramMailPlugin(Star):
                 while not changed and not self._stop_event.is_set():
                     if time.monotonic() >= idle_deadline:
                         break
-                    changed = await self._run_mail_io(
-                        self.mail_client.wait_for_new_mail,
-                        account,
-                        folder,
-                        IDLE_WAIT_SLICE,
-                        IDLE_WAIT_SLICE,
-                        self._thread_stop_event,
-                    )
+                    changed = await self._wait_for_new_mail(account, folder)
                 if changed:
                     try:
                         await self._poll_folder(account, folder, push=True)
@@ -494,7 +508,8 @@ class TelegramMailPlugin(Star):
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
-                        logger.exception(
+                        self._log_mail_error(
+                            exc,
                             "Mail IDLE follow-up poll failed for account %s folder %s",
                             account.account_id,
                             folder,
@@ -518,7 +533,8 @@ class TelegramMailPlugin(Star):
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
-                    logger.exception(
+                    self._log_mail_error(
+                        exc,
                         "Mail fallback poll failed for account %s folder %s",
                         account.account_id,
                         folder,
@@ -544,7 +560,8 @@ class TelegramMailPlugin(Star):
                 except asyncio.CancelledError:
                     raise
                 except Exception as poll_exc:
-                    logger.exception(
+                    self._log_mail_error(
+                        poll_exc,
                         "Mail reconnect poll failed for account %s folder %s",
                         account.account_id,
                         folder,
@@ -555,7 +572,8 @@ class TelegramMailPlugin(Star):
                     self.store.save()
                 await self._sleep_poll_interval(account)
             except Exception as exc:
-                logger.exception(
+                self._log_mail_error(
+                    exc,
                     "Mail IDLE failed for account %s folder %s",
                     account.account_id,
                     folder,
@@ -577,6 +595,13 @@ class TelegramMailPlugin(Star):
         except asyncio.TimeoutError:
             pass
 
+    @staticmethod
+    def _log_mail_error(exc: Exception, message: str, *args) -> None:
+        if isinstance(exc, MailConnectionError):
+            logger.warning("%s: %s", message % args if args else message, exc)
+            return
+        logger.exception(message, *args)
+
     async def _check_now(
         self, account_id: str = "", owner_id: str | None = None
     ) -> int:
@@ -596,12 +621,30 @@ class TelegramMailPlugin(Star):
         return total
 
     async def _poll_account(self, account: MailAccount, *, push: bool) -> int:
+        if self._serializes_account_mail_io(account):
+            async with self._account_mail_lock(account):
+                return await self._poll_account_unlocked(account, push=push)
+        return await self._poll_account_unlocked(account, push=push)
+
+    async def _poll_account_unlocked(self, account: MailAccount, *, push: bool) -> int:
         total = 0
         for folder in await self._resolve_account_folders(account):
-            total += await self._poll_folder(account, folder, push=push)
+            total += await self._poll_folder_unlocked(account, folder, push=push)
         return total
 
     async def _poll_folder(
+        self,
+        account: MailAccount,
+        folder: str,
+        *,
+        push: bool,
+    ) -> int:
+        if self._serializes_account_mail_io(account):
+            async with self._account_mail_lock(account):
+                return await self._poll_folder_unlocked(account, folder, push=push)
+        return await self._poll_folder_unlocked(account, folder, push=push)
+
+    async def _poll_folder_unlocked(
         self,
         account: MailAccount,
         folder: str,
@@ -658,6 +701,26 @@ class TelegramMailPlugin(Star):
 
         self._mark_account_checked(account)
         return total
+
+    async def _wait_for_new_mail(self, account: MailAccount, folder: str) -> bool:
+        if self._serializes_account_mail_io(account):
+            async with self._account_mail_lock(account):
+                return await self._run_mail_io(
+                    self.mail_client.wait_for_new_mail,
+                    account,
+                    folder,
+                    IDLE_WAIT_SLICE,
+                    IDLE_WAIT_SLICE,
+                    self._thread_stop_event,
+                )
+        return await self._run_mail_io(
+            self.mail_client.wait_for_new_mail,
+            account,
+            folder,
+            IDLE_WAIT_SLICE,
+            IDLE_WAIT_SLICE,
+            self._thread_stop_event,
+        )
 
     def _mark_account_checked(self, account: MailAccount) -> None:
         self.store.set_last_check(
@@ -1071,6 +1134,8 @@ class TelegramMailPlugin(Star):
                 raise OAuth2SlowDown from exc
             description = str(payload.get("error_description") or error)
             raise RuntimeError(description) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise MailConnectionError(f"OAuth2 请求失败: {exc}") from exc
 
     def _save_oauth2_token_response(
         self,
@@ -1101,6 +1166,8 @@ class TelegramMailPlugin(Star):
             },
         )
         self.store.save()
+        if hasattr(self, "mail_client"):
+            self.mail_client.invalidate_oauth2_cache(account)
 
     def _load_oauth2_token_state(self, account: MailAccount) -> dict[str, Any]:
         return self.store.get_oauth2_state(account.owner_id, account.account_id)
@@ -1913,7 +1980,20 @@ class TelegramMailPlugin(Star):
 
     @staticmethod
     def _account_state_key(account: MailAccount) -> str:
-        return f"{account.owner_id}:{account.account_id}"
+        return f"{account.owner_id}:{account.account_id}:{account.imap_user.casefold()}"
+
+    def _serializes_account_mail_io(self, account: MailAccount) -> bool:
+        return account.imap_auth_type == "oauth2"
+
+    def _account_mail_lock(self, account: MailAccount) -> asyncio.Lock:
+        if not hasattr(self, "_account_mail_locks"):
+            self._account_mail_locks = {}
+        key = self._account_state_key(account)
+        lock = self._account_mail_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._account_mail_locks[key] = lock
+        return lock
 
     def _event_owner_id(self, event: AstrMessageEvent) -> str:
         return _normalize_owner_id(event.get_sender_id() or event.session.session_id)
