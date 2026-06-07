@@ -1,3 +1,4 @@
+import imaplib
 import urllib.error
 import urllib.parse
 
@@ -282,3 +283,49 @@ def test_imap_connection_uses_configured_timeout(monkeypatch):
         pass
 
     assert calls == [("outlook.office365.com", 993, 9)]
+
+
+def test_imap_oauth2_authenticate_failed_retries_with_fresh_token(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class Client:
+        def __init__(self, host, port, timeout):
+            pass
+
+        def authenticate(self, mechanism, authobject):
+            calls.append(authobject(None))
+            if len(calls) == 1:
+                raise imaplib.IMAP4.error("AUTHENTICATE failed")
+            return "OK", []
+
+        def close(self):
+            return None
+
+        def logout(self):
+            return None
+
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.imaplib.IMAP4_SSL",
+        Client,
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_telegram_mail.mail_client.time.sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+    client = MailClient(
+        oauth2_token_loader=lambda account: {
+            "access_token": f"fresh-{len(calls)}",
+            "refresh_token": "",
+            "expires_at": 9999999999.0,
+        }
+    )
+
+    with client._imap(_account(oauth2_access_token="")):
+        pass
+
+    assert calls == [
+        b"user=user@outlook.com\x01auth=Bearer fresh-0\x01\x01",
+        b"user=user@outlook.com\x01auth=Bearer fresh-1\x01\x01",
+    ]
+    assert sleeps == [2]

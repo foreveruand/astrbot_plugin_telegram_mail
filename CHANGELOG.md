@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.11
+
+- Retried Outlook OAuth2 IMAP authentication once after transient `AUTHENTICATE failed` errors, clearing the cached access token before retrying.
+
 ## 0.1.10
 
 - Serialized OAuth2 token refresh per account to avoid concurrent refresh attempts corrupting Microsoft single-use refresh tokens.

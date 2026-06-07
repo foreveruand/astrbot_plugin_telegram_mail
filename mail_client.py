@@ -228,11 +228,18 @@ class MailClient:
                     client.logout()
                 except Exception:
                     pass
-                if attempt == 0 and "not connected" in str(exc).lower():
-                    # Outlook returns this when it sees a stale/duplicate session or
-                    # an expired token.  Clear the token cache so the retry fetches
-                    # a fresh token, then wait briefly for the server to release the
-                    # previous session.
+                err_msg = str(exc).lower()
+                if (
+                    attempt == 0
+                    and account.imap_auth_type == "oauth2"
+                    and ("not connected" in err_msg or "authenticate" in err_msg)
+                ):
+                    # Outlook returns various transient auth errors ("AUTHENTICATE
+                    # failed", "User is authenticated but not connected") when a token
+                    # is stale, a previous session is still being cleaned up, or the
+                    # server is rate-limiting.  Clear the token cache so the retry
+                    # fetches a fresh token, then wait briefly for the server to
+                    # release the previous session.
                     self._oauth2_cache.pop(account.account_id, None)
                     time.sleep(2)
                     continue
@@ -315,14 +322,18 @@ class MailClient:
                 return cached[0]
 
             now = time.time()
-            stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
+            stored = (
+                self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
+            )
             access_token = str(
                 stored.get("access_token") or account.oauth2_access_token or ""
             )
             refresh_token = str(
                 stored.get("refresh_token") or account.oauth2_refresh_token or ""
             )
-            expires_at = float(stored.get("expires_at") or account.oauth2_expires_at or 0)
+            expires_at = float(
+                stored.get("expires_at") or account.oauth2_expires_at or 0
+            )
 
             if access_token and expires_at > now + 60:
                 self._oauth2_cache[cache_key] = (access_token, expires_at)
@@ -382,7 +393,9 @@ class MailClient:
             expires_at = time.time() + expires_in
             self._oauth2_cache[cache_key] = (access_token, expires_at)
             if self._oauth2_token_updater:
-                self._oauth2_token_updater(account, {**payload, "expires_at": expires_at})
+                self._oauth2_token_updater(
+                    account, {**payload, "expires_at": expires_at}
+                )
             return access_token
 
     @staticmethod
