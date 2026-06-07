@@ -47,6 +47,8 @@ class MailClient:
         self._oauth2_token_updater = oauth2_token_updater
         self._oauth2_token_loader = oauth2_token_loader
         self.network_timeout = max(int(network_timeout), 1)
+        self._oauth2_refresh_locks: dict[str, threading.Lock] = {}
+        self._oauth2_locks_guard = threading.Lock()
 
     def list_uids(self, account: MailAccount, folder: str) -> list[str]:
         with self._imap(account) as client:
@@ -196,29 +198,45 @@ class MailClient:
             client.send_message(message)
 
     def _imap(self, account: MailAccount):
-        if account.imap_tls:
-            client = imaplib.IMAP4_SSL(
-                account.imap_host,
-                account.imap_port,
-                timeout=self.network_timeout,
-            )
-        else:
-            client = imaplib.IMAP4(
-                account.imap_host,
-                account.imap_port,
-                timeout=self.network_timeout,
-            )
-        if account.imap_auth_type == "oauth2":
-            client.authenticate(
-                "XOAUTH2",
-                lambda _: self._xoauth2_string(
-                    account.imap_user,
-                    self._oauth2_access_token(account),
-                ),
-            )
-        else:
-            client.login(account.imap_user, account.imap_password)
-        return _ImapContext(client)
+        for attempt in range(2):
+            if account.imap_tls:
+                client = imaplib.IMAP4_SSL(
+                    account.imap_host,
+                    account.imap_port,
+                    timeout=self.network_timeout,
+                )
+            else:
+                client = imaplib.IMAP4(
+                    account.imap_host,
+                    account.imap_port,
+                    timeout=self.network_timeout,
+                )
+            try:
+                if account.imap_auth_type == "oauth2":
+                    client.authenticate(
+                        "XOAUTH2",
+                        lambda _: self._xoauth2_string(
+                            account.imap_user,
+                            self._oauth2_access_token(account),
+                        ),
+                    )
+                else:
+                    client.login(account.imap_user, account.imap_password)
+                return _ImapContext(client)
+            except imaplib.IMAP4.error as exc:
+                try:
+                    client.logout()
+                except Exception:
+                    pass
+                if attempt == 0 and "not connected" in str(exc).lower():
+                    # Outlook returns this when it sees a stale/duplicate session or
+                    # an expired token.  Clear the token cache so the retry fetches
+                    # a fresh token, then wait briefly for the server to release the
+                    # previous session.
+                    self._oauth2_cache.pop(account.account_id, None)
+                    time.sleep(2)
+                    continue
+                raise
 
     @staticmethod
     def _select_folder(client: imaplib.IMAP4, folder: str) -> None:
@@ -280,80 +298,92 @@ class MailClient:
 
     def _oauth2_access_token(self, account: MailAccount) -> str:
         cache_key = account.account_id
-        now = time.time()
+        # Fast path: no lock needed for a cache hit.
         cached = self._oauth2_cache.get(cache_key)
         if cached and cached[1] > time.time() + 60:
             return cached[0]
 
-        stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
-        access_token = str(
-            stored.get("access_token") or account.oauth2_access_token or ""
-        )
-        refresh_token = str(
-            stored.get("refresh_token") or account.oauth2_refresh_token or ""
-        )
-        expires_at = float(stored.get("expires_at") or account.oauth2_expires_at or 0)
+        # Serialize refresh per account so concurrent threads don't race to
+        # refresh the same token (which can corrupt the stored refresh token).
+        with self._oauth2_locks_guard:
+            if cache_key not in self._oauth2_refresh_locks:
+                self._oauth2_refresh_locks[cache_key] = threading.Lock()
+        with self._oauth2_refresh_locks[cache_key]:
+            # Re-check under lock — a concurrent thread may have refreshed already.
+            cached = self._oauth2_cache.get(cache_key)
+            if cached and cached[1] > time.time() + 60:
+                return cached[0]
 
-        if access_token and expires_at > now + 60:
-            self._oauth2_cache[cache_key] = (access_token, expires_at)
-            return access_token
-        if access_token and not refresh_token:
-            return access_token
-        if not refresh_token:
-            raise RuntimeError(
-                f"OAuth2 account {account.account_id} is not authorized; run /mail oauth {account.account_id}"
+            now = time.time()
+            stored = self._oauth2_token_loader(account) if self._oauth2_token_loader else {}
+            access_token = str(
+                stored.get("access_token") or account.oauth2_access_token or ""
             )
-        if not account.oauth2_client_id:
-            raise RuntimeError(
-                f"OAuth2 account {account.account_id} is missing oauth2_client_id"
+            refresh_token = str(
+                stored.get("refresh_token") or account.oauth2_refresh_token or ""
             )
+            expires_at = float(stored.get("expires_at") or account.oauth2_expires_at or 0)
 
-        form = {
-            "client_id": account.oauth2_client_id,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-        if account.oauth2_scope:
-            form["scope"] = account.oauth2_scope
-
-        data = urllib.parse.urlencode(form).encode("utf-8")
-        request = urllib.request.Request(
-            account.oauth2_token_url,
-            data=data,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.network_timeout,
-            ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            try:
-                error_payload = json.loads(body)
-            except json.JSONDecodeError:
+            if access_token and expires_at > now + 60:
+                self._oauth2_cache[cache_key] = (access_token, expires_at)
+                return access_token
+            if access_token and not refresh_token:
+                return access_token
+            if not refresh_token:
                 raise RuntimeError(
-                    f"OAuth2 token refresh failed for {account.account_id}: HTTP {exc.code}"
-                ) from exc
-            error = str(error_payload.get("error") or "")
-            description = str(error_payload.get("error_description") or error)
-            raise RuntimeError(
-                f"OAuth2 token refresh failed for {account.account_id}: "
-                f"HTTP {exc.code} {description}"
-            ) from exc
-        access_token = str(payload.get("access_token") or "")
-        if not access_token:
-            raise RuntimeError(
-                f"OAuth2 token response for {account.account_id} has no access_token"
+                    f"OAuth2 account {account.account_id} is not authorized; run /mail oauth {account.account_id}"
+                )
+            if not account.oauth2_client_id:
+                raise RuntimeError(
+                    f"OAuth2 account {account.account_id} is missing oauth2_client_id"
+                )
+
+            form = {
+                "client_id": account.oauth2_client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+            if account.oauth2_scope:
+                form["scope"] = account.oauth2_scope
+
+            data = urllib.parse.urlencode(form).encode("utf-8")
+            request = urllib.request.Request(
+                account.oauth2_token_url,
+                data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
             )
-        expires_in = int(payload.get("expires_in") or 3600)
-        expires_at = time.time() + expires_in
-        self._oauth2_cache[cache_key] = (access_token, expires_at)
-        if self._oauth2_token_updater:
-            self._oauth2_token_updater(account, {**payload, "expires_at": expires_at})
-        return access_token
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.network_timeout,
+                ) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                try:
+                    error_payload = json.loads(body)
+                except json.JSONDecodeError:
+                    raise RuntimeError(
+                        f"OAuth2 token refresh failed for {account.account_id}: HTTP {exc.code}"
+                    ) from exc
+                error = str(error_payload.get("error") or "")
+                description = str(error_payload.get("error_description") or error)
+                raise RuntimeError(
+                    f"OAuth2 token refresh failed for {account.account_id}: "
+                    f"HTTP {exc.code} {description}"
+                ) from exc
+            access_token = str(payload.get("access_token") or "")
+            if not access_token:
+                raise RuntimeError(
+                    f"OAuth2 token response for {account.account_id} has no access_token"
+                )
+            expires_in = int(payload.get("expires_in") or 3600)
+            expires_at = time.time() + expires_in
+            self._oauth2_cache[cache_key] = (access_token, expires_at)
+            if self._oauth2_token_updater:
+                self._oauth2_token_updater(account, {**payload, "expires_at": expires_at})
+            return access_token
 
     @staticmethod
     def _supports_idle(client: imaplib.IMAP4) -> bool:

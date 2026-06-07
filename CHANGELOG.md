@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10
+
+- Serialized OAuth2 token refresh per account to avoid concurrent refresh attempts corrupting Microsoft single-use refresh tokens.
+- Retried Outlook IMAP authentication once after the `User is authenticated but not connected` error, clearing the cached access token before retrying.
+
 ## 0.1.9
 
 - Fixed Outlook OAuth2 IMAP authentication by returning bytes from the XOAUTH2 IMAP callback payload.
