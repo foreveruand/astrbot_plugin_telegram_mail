@@ -248,12 +248,12 @@ class MailClient:
                     and account.imap_auth_type == "oauth2"
                     and ("not connected" in err_msg or "authenticate" in err_msg)
                 ):
-                    # Outlook returns various transient auth errors ("AUTHENTICATE
+                    # Outlook returns various auth/session errors ("AUTHENTICATE
                     # failed", "User is authenticated but not connected") when a token
-                    # is stale, a previous session is still being cleaned up, or the
-                    # server is rate-limiting.  Clear the token cache so the retry
-                    # fetches a fresh token, then wait briefly for the server to
-                    # release the previous session.
+                    # is stale, IMAP access is disabled, a previous session is still
+                    # being cleaned up, or the server is rate-limiting. Clear the
+                    # token cache so the retry fetches a fresh token, then wait
+                    # briefly for the server to release the previous session.
                     self.invalidate_oauth2_cache(account)
                     time.sleep(2)
                     continue
@@ -512,8 +512,9 @@ class MailClient:
             return (
                 f"账号 {account.owner_id}/{account.account_id} ({account.imap_user}) "
                 "的 Outlook IMAP OAuth2 会话建立失败，插件已重试一次。"
-                "这通常是 Outlook IMAP 临时连接或会话限制问题；请先重试，"
-                "必要时减少监听文件夹或关闭实时监听。"
+                "这通常表示 Outlook/邮箱账号尚未开启 IMAP 访问，或 IMAP 设置刚开启尚未生效；"
+                "请先在 Outlook 网页版或邮箱账号设置中开启 POP/IMAP 的 IMAP 访问，"
+                "等待数分钟后重试。若已确认开启，再减少监听文件夹或关闭实时监听以排除会话限制。"
                 f"原始错误: {detail}"
             )
         if account.imap_auth_type == "oauth2" and (

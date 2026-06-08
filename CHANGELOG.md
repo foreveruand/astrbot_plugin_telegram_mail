@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.16
+
+- Updated repeated Outlook IMAP OAuth2 `User is authenticated but not connected` errors to tell users to enable Outlook/POP/IMAP IMAP access and wait for the setting to take effect before reducing realtime polling pressure.
+- Clarified the Outlook OAuth2 troubleshooting notes in the README based on the verified IMAP enablement behavior.
+
 ## 0.1.15
 
 - Migrated Telegram mail state storage from `state.json` to SQLite in the plugin data directory.

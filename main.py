@@ -265,7 +265,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.15",
+    "0.1.16",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
