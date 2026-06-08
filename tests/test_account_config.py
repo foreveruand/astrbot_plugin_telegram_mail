@@ -1,10 +1,14 @@
+import json
+
 from astrbot_plugin_telegram_mail.main import (
     DEFAULT_IDLE_TIMEOUT,
     IMAP_FOLDER_MODE_AUTO,
     IMAP_FOLDER_MODE_CONFIGURED,
+    LEGACY_CONFIG_MIGRATION_META_KEY,
     TelegramMailPlugin,
 )
 from astrbot_plugin_telegram_mail.mail_client import MailClient
+from astrbot_plugin_telegram_mail.storage import JsonStore
 
 
 def _plugin(config=None):
@@ -292,3 +296,61 @@ def test_device_code_token_poll_does_not_send_client_secret(monkeypatch):
     assert calls[0][1]["client_id"] == "client-id"
     assert calls[0][1]["device_code"] == "device-code"
     assert calls[0][2] == ""
+
+
+def test_accounts_json_first_start_imports_database(tmp_path):
+    plugin = _plugin({"accounts_json": json.dumps([_account_config()])})
+    plugin.store = JsonStore(tmp_path)
+    plugin.store.load()
+
+    plugin._migrate_legacy_config_accounts()
+
+    accounts = plugin._accounts()
+    assert [account.account_id for account in accounts] == ["a1"]
+    assert accounts[0].owner_id == "default"
+    assert plugin.store.account_configs("default") == [_account_config()]
+    assert plugin.store.get_meta(LEGACY_CONFIG_MIGRATION_META_KEY)["completed"] is True
+
+
+def test_legacy_config_marker_prevents_restart_reimport(tmp_path):
+    plugin = _plugin({"accounts_json": json.dumps([_account_config()])})
+    plugin.store = JsonStore(tmp_path)
+    plugin.store.load()
+    plugin._migrate_legacy_config_accounts()
+
+    restarted = _plugin(
+        {"accounts_json": json.dumps([_account_config(account_id="a2")])}
+    )
+    restarted.store = JsonStore(tmp_path)
+    restarted.store.load()
+    restarted._migrate_legacy_config_accounts()
+
+    assert [account.account_id for account in restarted._accounts()] == ["a1"]
+    assert restarted.store.account_configs("default") == [_account_config()]
+
+
+def test_accounts_uses_database_without_legacy_config_duplicates(tmp_path):
+    plugin = _plugin(
+        {
+            "accounts_json": json.dumps(
+                [_account_config(imap_user="config@example.com")]
+            )
+        }
+    )
+    plugin.store = JsonStore(tmp_path)
+    plugin.store.load()
+    plugin.store.set_account_config(
+        "default",
+        "a1",
+        _account_config(imap_user="db@example.com"),
+    )
+
+    plugin._migrate_legacy_config_accounts()
+
+    accounts = plugin._accounts()
+    assert len(accounts) == 1
+    assert accounts[0].imap_user == "db@example.com"
+    assert plugin.store.account_configs("default") == [
+        _account_config(imap_user="db@example.com")
+    ]
+    assert plugin.store.get_meta(LEGACY_CONFIG_MIGRATION_META_KEY)["skipped"] == 1

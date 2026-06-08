@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- Migrated Telegram mail state storage from `state.json` to SQLite in the plugin data directory.
+- Automatically imported legacy `state.json` data and old `accounts` / `accounts_json` config into the new database.
+- Kept existing database records authoritative during migration to avoid overwriting newer account or token data.
+
 ## 0.1.14
 
 - Changed Outlook/OAuth2 realtime mail checks to account-level polling instead of per-folder IMAP IDLE watchers, avoiding long IDLE waits blocking the same OAuth2 account.

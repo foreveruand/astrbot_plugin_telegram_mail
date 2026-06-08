@@ -95,7 +95,7 @@ Outlook 示例：
 }
 ```
 
-`provider: "outlook"` 会默认使用 Microsoft 文档中的 IMAP/SMTP 设置：IMAP `outlook.office365.com:993` SSL/TLS，SMTP `smtp-mail.outlook.com:587` STARTTLS，并默认启用 OAuth2。保存账号后执行 `/mail oauth outlook-main`，插件会返回 Microsoft 授权链接和一次性代码；用户授权完成后，access token / refresh token 会保存到插件数据目录的 `state.json` 用户分桶中，后续 access token 过期会用 refresh token 自动刷新。
+`provider: "outlook"` 会默认使用 Microsoft 文档中的 IMAP/SMTP 设置：IMAP `outlook.office365.com:993` SSL/TLS，SMTP `smtp-mail.outlook.com:587` STARTTLS，并默认启用 OAuth2。保存账号后执行 `/mail oauth outlook-main`，插件会返回 Microsoft 授权链接和一次性代码；用户授权完成后，access token / refresh token 会保存在插件数据目录下的 SQLite 状态库中，后续 access token 过期会用 refresh token 自动刷新。
 
 `imap_folder_mode` 有两个值：
 
@@ -106,7 +106,9 @@ Microsoft access token 通常是短期有效，refresh token 因为请求了 `of
 
 Outlook/OAuth2 账号即使开启 `realtime_enabled`，也不会为每个文件夹创建 IMAP IDLE watcher，而是按账号执行一次轮询，串行扫描解析后的所有文件夹，然后按 `poll_interval` 休眠；`/mail status` 中会显示 `mode=oauth2 polling`。这个模式牺牲 IMAP IDLE 的即时性，换取多文件夹和多个 Outlook 账号下更稳定的 OAuth2 IMAP 连接。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed` 或 `User is authenticated but not connected`，插件会清除该账号的 access token 缓存并自动重试一次；如果重试后仍失败，后台日志会输出可读 warning，并在 `/mail status` 建议先重试、减少监听文件夹或关闭实时监听。若错误显示 `invalid_grant`、`AADSTS700082` 或其它明确的 AADSTS token 过期/撤销信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，此时需要重新执行 `/mail oauth <account_id>`。Microsoft Graph message delta 是后续更稳定的多文件夹增量同步方向，但当前版本仍继续使用 IMAP/SMTP OAuth2，不新增 Graph 依赖或权限。
 
-插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。
+插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。首次启动时，旧 `accounts` / `accounts_json` 会自动导入到 SQLite 状态库中，数据库里已有的同名账号会保留原值。
+
+插件旧版 `state.json` 也会自动迁移到 SQLite；迁移后文件里会保留一个兼容标记，方便回滚或人工核查，但运行时状态以 `mail_state.db` 为准。
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 

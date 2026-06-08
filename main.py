@@ -83,6 +83,7 @@ MICROSOFT_OUTLOOK_SCOPE = (
     "https://outlook.office.com/SMTP.Send offline_access"
 )
 OWNER_ID_FALLBACK = "default"
+LEGACY_CONFIG_MIGRATION_META_KEY = "legacy_config_accounts_migration"
 MAIL_COMMAND_RE = re.compile(r"^/?mail(?:@\S+)?$", re.IGNORECASE)
 ADD_SESSION_TIMEOUT = 300
 SUPPORTED_ADD_PROVIDERS = {"gmail", "outlook", "qq"}
@@ -264,7 +265,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.14",
+    "0.1.15",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -293,6 +294,7 @@ class TelegramMailPlugin(Star):
     async def initialize(self) -> None:
         _patch_telegram_callback_edit_message_preview()
         self.store.load()
+        self._migrate_legacy_config_accounts()
         accounts = self._accounts()
         for account in accounts:
             if not account.enabled:
@@ -1692,28 +1694,62 @@ class TelegramMailPlugin(Star):
 
     def _accounts(self) -> list[MailAccount]:
         accounts: list[MailAccount] = []
-
-        raw_accounts = self.config.get("accounts")
-        if raw_accounts:
-            if not isinstance(raw_accounts, list):
-                raise ValueError("accounts/accounts_json 必须是账号数组")
-            for item in raw_accounts:
-                accounts.append(self._parse_account(item, OWNER_ID_FALLBACK))
-        else:
-            raw_json = self.config.get("accounts_json", "[]")
-            try:
-                raw_json_accounts = json.loads(raw_json or "[]")
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"accounts_json 不是合法 JSON: {exc}") from exc
-            if not isinstance(raw_json_accounts, list):
-                raise ValueError("accounts/accounts_json 必须是账号数组")
-            for item in raw_json_accounts:
-                accounts.append(self._parse_account(item, OWNER_ID_FALLBACK))
-
         for owner_id, item in self.store.all_account_configs():
             accounts.append(self._parse_account(item, owner_id))
 
         return accounts
+
+    def _migrate_legacy_config_accounts(self) -> None:
+        marker = self.store.get_meta(LEGACY_CONFIG_MIGRATION_META_KEY)
+        if isinstance(marker, dict) and marker.get("completed"):
+            return
+
+        imported = 0
+        skipped = 0
+        for item in self._legacy_config_account_items():
+            account_id = _legacy_account_id(item)
+            if account_id and self.store.has_account_config(
+                OWNER_ID_FALLBACK, account_id
+            ):
+                skipped += 1
+                continue
+            account = self._parse_account(item, OWNER_ID_FALLBACK)
+            inserted = self.store.set_account_config_if_absent(
+                OWNER_ID_FALLBACK,
+                account.account_id,
+                item,
+            )
+            if inserted:
+                imported += 1
+            else:
+                skipped += 1
+
+        self.store.set_meta(
+            LEGACY_CONFIG_MIGRATION_META_KEY,
+            {
+                "completed": True,
+                "imported": imported,
+                "skipped": skipped,
+                "completed_at": time.time(),
+            },
+        )
+        self.store.save()
+
+    def _legacy_config_account_items(self) -> list[dict[str, Any]]:
+        raw_accounts = self.config.get("accounts")
+        if raw_accounts:
+            if not isinstance(raw_accounts, list):
+                raise ValueError("accounts/accounts_json 必须是账号数组")
+            return raw_accounts
+
+        raw_json = self.config.get("accounts_json", "[]")
+        try:
+            raw_json_accounts = json.loads(raw_json or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"accounts_json 不是合法 JSON: {exc}") from exc
+        if not isinstance(raw_json_accounts, list):
+            raise ValueError("accounts/accounts_json 必须是账号数组")
+        return raw_json_accounts
 
     def _account(self, account_id: str, owner_id: str | None = None) -> MailAccount:
         accounts = self._accounts()
@@ -2135,3 +2171,9 @@ def _normalize_owner_id(value: str) -> str:
     if ":" in value:
         return value.rsplit(":", 1)[-1].strip() or OWNER_ID_FALLBACK
     return value
+
+
+def _legacy_account_id(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("account_id") or item.get("id") or "").strip()
