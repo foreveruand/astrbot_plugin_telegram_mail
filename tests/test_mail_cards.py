@@ -1,7 +1,7 @@
-from astrbot.api.message_components import Plain
-
 from astrbot_plugin_telegram_mail.main import TelegramMailPlugin
 from astrbot_plugin_telegram_mail.models import MailAttachment, ParsedMail
+
+from astrbot.api.message_components import Plain
 
 
 def _plugin():

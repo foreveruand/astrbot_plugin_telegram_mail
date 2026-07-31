@@ -24,6 +24,9 @@ UNSUBSCRIBE_ANCHOR_RE = re.compile(
     r"<a\b[^>]+href=[\"']([^\"']+)[\"'][^>]*>[^<]*(?:unsubscribe|退订|取消订阅)[^<]*</a>",
     re.IGNORECASE,
 )
+ANCHOR_RE = re.compile(r"(?si)<a\b([^>]*?)>(.*?)</a>")
+HREF_RE = re.compile(r"""(?si)href\s*=\s*["']([^"']*)["']""")
+_MARKDOWN_ESCAPE_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
 
 
 def parse_message(raw: bytes, *, account_id: str, folder: str, uid: str) -> ParsedMail:
@@ -35,6 +38,14 @@ def parse_message(raw: bytes, *, account_id: str, folder: str, uid: str) -> Pars
     date_datetime = parse_message_datetime(message.get("Date", ""))
     date = _format_date(message.get("Date", ""), date_datetime)
     body_text, body_html = _extract_bodies(message)
+    body_markdown = False
+    if body_text:
+        body = body_text
+    elif body_html:
+        body = html_to_markdown_text(body_html)
+        body_markdown = bool(body)
+    else:
+        body = ""
     attachments = _extract_attachments(message)
     unsubscribe_urls, unsubscribe_mailtos = _extract_unsubscribe(message, body_html)
 
@@ -48,8 +59,9 @@ def parse_message(raw: bytes, *, account_id: str, folder: str, uid: str) -> Pars
         sender_email=sender_email.lower(),
         recipients=recipients,
         date=date,
-        body_text=body_text or html_to_text(body_html),
+        body_text=body,
         body_html=body_html,
+        body_markdown=body_markdown,
         attachments=attachments,
         unsubscribe_urls=unsubscribe_urls,
         unsubscribe_mailtos=unsubscribe_mailtos,
@@ -78,6 +90,62 @@ def html_to_text(value: str) -> str:
     lines = [WHITESPACE_RE.sub(" ", line).strip() for line in value.splitlines()]
     lines = _strip_leading_boilerplate(lines)
     return "\n".join(line for line in lines if line).strip()
+
+
+def html_to_markdown_text(value: str) -> str:
+    """Convert HTML mail body to Telegram MarkdownV2-ready text.
+
+    Anchor links are rendered as ``[text](url)`` inline links so the raw URL is
+    not dumped verbatim; surrounding markup is stripped like ``html_to_text``.
+
+    Args:
+        value: Raw HTML body of a mail part.
+
+    Returns:
+        Markdown-escaped text with anchors preserved as Telegram inline links.
+    """
+    if not value:
+        return ""
+    value = HTML_STYLE_BLOCK_RE.sub(" ", value)
+    value = HTML_COMMENT_RE.sub(" ", value)
+    value = _convert_anchors(value)
+    value = re.sub(r"(?i)<br\s*/?>", "\n", value)
+    value = re.sub(r"(?i)</p\s*>", "\n\n", value)
+    value = re.sub(r"(?i)</div\s*>", "\n", value)
+    value = HTML_TAG_RE.sub(" ", value)
+    value = html.unescape(value).replace("\xa0", " ")
+    lines = [WHITESPACE_RE.sub(" ", line).strip() for line in value.splitlines()]
+    lines = _strip_leading_boilerplate(lines)
+    return "\n".join(line for line in lines if line).strip()
+
+
+def markdown_escape(value: str) -> str:
+    """Escape Telegram MarkdownV2 special characters."""
+    return _MARKDOWN_ESCAPE_RE.sub(r"\\\1", str(value or ""))
+
+
+def markdown_link_escape(value: str) -> str:
+    """Escape characters that break a MarkdownV2 link URL."""
+    return str(value or "").replace("\\", "\\\\").replace(")", r"\)")
+
+
+def _convert_anchors(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        attrs, inner = match.group(1), match.group(2)
+        href_match = HREF_RE.search(attrs)
+        href = html.unescape(href_match.group(1)).strip() if href_match else ""
+        text = html.unescape(HTML_TAG_RE.sub(" ", inner)).strip()
+        if not href:
+            return text
+        if not text:
+            text = href
+        link_text = markdown_escape(text)
+        link_url = markdown_link_escape(href)
+        if not link_text or not link_url:
+            return text
+        return f"[{link_text}]({link_url})"
+
+    return ANCHOR_RE.sub(replace, value)
 
 
 def extract_attachment_payload(raw: bytes, index: int) -> tuple[str, bytes, str]:

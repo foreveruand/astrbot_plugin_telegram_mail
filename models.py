@@ -65,6 +65,7 @@ class ParsedMail:
     date: str
     body_text: str
     body_html: str
+    body_markdown: bool = False
     attachments: list[MailAttachment] = field(default_factory=list)
     unsubscribe_urls: list[str] = field(default_factory=list)
     unsubscribe_mailtos: list[str] = field(default_factory=list)

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17
+
+- Rendered HTML mail hyperlinks as Telegram MarkdownV2 inline links `[text](url)`. HTML-only emails no longer dump raw, non-clickable URLs into the pushed/full-text view; the anchor text is shown and Telegram opens the original URL through the inline link.
+
 ## 0.1.16
 
 - Updated repeated Outlook IMAP OAuth2 `User is authenticated but not connected` errors to tell users to enable Outlook/POP/IMAP IMAP access and wait for the setting to take effect before reducing realtime polling pressure.

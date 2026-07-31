@@ -5,6 +5,36 @@ from astrbot_plugin_telegram_mail.parser import (
 )
 
 
+def test_html_to_markdown_text_renders_anchors_as_inline_links():
+    from astrbot_plugin_telegram_mail.parser import html_to_markdown_text
+
+    html_body = (
+        "<p>请点击 "
+        '<a href="https://example.com/path?x=1">查看详情</a>，'
+        '或访问 <a href="https://example.com">https://example.com</a>。</p>'
+    )
+    text = html_to_markdown_text(html_body)
+    assert text == (
+        "请点击 [查看详情](https://example.com/path?x=1)，"
+        "或访问 [https://example\\.com](https://example.com)。"
+    )
+
+
+def test_parse_message_html_body_markdown_links():
+    raw = (
+        b"From: Sender <sender@example.com>\r\n"
+        b"To: User <user@example.com>\r\n"
+        b"Subject: Link mail\r\n"
+        b"MIME-Version: 1.0\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n"
+        b"\r\n"
+        b'<p>Hi <a href="https://example.com">click</a> here</p>\r\n'
+    )
+    parsed = parse_message(raw, account_id="a1", folder="INBOX", uid="9")
+    assert parsed.body_markdown is True
+    assert parsed.body_text == "Hi [click](https://example.com) here"
+
+
 def test_parse_plain_message_with_attachment():
     raw = (
         b"From: Sender <sender@example.com>\r\n"

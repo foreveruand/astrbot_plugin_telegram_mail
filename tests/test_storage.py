@@ -134,9 +134,7 @@ def test_migrates_legacy_top_level_state_json_to_default_owner(tmp_path):
     assert store.get_seen(DEFAULT_OWNER_ID, "a1", "INBOX") == {"1"}
     assert store.is_initialized(DEFAULT_OWNER_ID, "a1", "INBOX")
     assert store.get_token(DEFAULT_OWNER_ID, "tok1")["uid"] == "1"
-    assert store.get_oauth2_state(DEFAULT_OWNER_ID, "a1") == {
-        "access_token": "access"
-    }
+    assert store.get_oauth2_state(DEFAULT_OWNER_ID, "a1") == {"access_token": "access"}
     assert store.is_blocked(DEFAULT_OWNER_ID, "a1", "news@example.org")
     assert store.last_error(DEFAULT_OWNER_ID, "a1") == "error"
     assert store.last_check(DEFAULT_OWNER_ID, "a1") == "2026-06-08 10:00:00"

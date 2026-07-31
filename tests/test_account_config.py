@@ -1,5 +1,6 @@
 import json
 
+from astrbot_plugin_telegram_mail.mail_client import MailClient
 from astrbot_plugin_telegram_mail.main import (
     DEFAULT_IDLE_TIMEOUT,
     IMAP_FOLDER_MODE_AUTO,
@@ -7,7 +8,6 @@ from astrbot_plugin_telegram_mail.main import (
     LEGACY_CONFIG_MIGRATION_META_KEY,
     TelegramMailPlugin,
 )
-from astrbot_plugin_telegram_mail.mail_client import MailClient
 from astrbot_plugin_telegram_mail.storage import JsonStore
 
 
@@ -331,11 +331,7 @@ def test_legacy_config_marker_prevents_restart_reimport(tmp_path):
 
 def test_accounts_uses_database_without_legacy_config_duplicates(tmp_path):
     plugin = _plugin(
-        {
-            "accounts_json": json.dumps(
-                [_account_config(imap_user="config@example.com")]
-            )
-        }
+        {"accounts_json": json.dumps([_account_config(imap_user="config@example.com")])}
     )
     plugin.store = JsonStore(tmp_path)
     plugin.store.load()

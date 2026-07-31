@@ -1,7 +1,7 @@
 import imaplib
-import pytest
 import threading
 
+import pytest
 from astrbot_plugin_telegram_mail import mail_client
 from astrbot_plugin_telegram_mail.mail_client import MailClient, MailIdleDisconnected
 

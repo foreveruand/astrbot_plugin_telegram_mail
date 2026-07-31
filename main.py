@@ -38,7 +38,12 @@ from .mail_client import (
     MailIdleDisconnected,
 )
 from .models import MailAccount, ParsedMail
-from .parser import extract_attachment_payload, parse_message
+from .parser import (
+    extract_attachment_payload,
+    markdown_escape,
+    markdown_link_escape,
+    parse_message,
+)
 from .storage import JsonStore
 
 PLUGIN_NAME = "astrbot_plugin_telegram_mail"
@@ -265,7 +270,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.16",
+    "0.1.17",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -1477,10 +1482,7 @@ class TelegramMailPlugin(Star):
         parsed: ParsedMail,
         token: str,
     ) -> MessageChain:
-        preview = self._markdown_escape(
-            self._truncate(parsed.body_text, self._preview_length())
-            or "(No text content)"
-        )
+        preview = self._render_body_preview(parsed, self._preview_length())
         sender_text = self._sender_markdown(parsed)
         text = (
             f"📬 {self._markdown_escape(account.display_name)}\n"
@@ -1520,13 +1522,13 @@ class TelegramMailPlugin(Star):
         token: str,
         page: int,
     ) -> MessageChain:
-        body = parsed.body_text or "(No text content)"
+        body = self._render_body_full(parsed)
         pages = self._paginate(body, self._page_size())
         page = max(0, min(page, len(pages) - 1))
         text = (
             f"📖 {self._markdown_escape(account.display_name)} · {self._markdown_escape(parsed.subject)}\n"
             f"Page {page + 1}/{len(pages)}\n\n"
-            f"{self._markdown_escape(pages[page])}"
+            f"{pages[page]}"
         )
         nav = []
         if page > 0:
@@ -2041,6 +2043,22 @@ class TelegramMailPlugin(Star):
             return value
         return value[: limit - 1].rstrip() + "…"
 
+    def _render_body_preview(self, parsed: ParsedMail, limit: int) -> str:
+        return self._render_body(parsed, limit)
+
+    def _render_body_full(self, parsed: ParsedMail) -> str:
+        return self._render_body(parsed, None)
+
+    def _render_body(self, parsed: ParsedMail, limit: int | None) -> str:
+        text = (parsed.body_text or "").strip()
+        if limit is not None:
+            text = self._truncate(text, limit)
+        if not text:
+            return "(No text content)"
+        if parsed.body_markdown:
+            return text
+        return self._markdown_escape(text)
+
     @staticmethod
     def _paginate(value: str, size: int) -> list[str]:
         value = value.strip() or "(No text content)"
@@ -2056,7 +2074,7 @@ class TelegramMailPlugin(Star):
 
     @staticmethod
     def _markdown_escape(value: str) -> str:
-        return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(value or ""))
+        return markdown_escape(value)
 
     def _sender_markdown(self, parsed: ParsedMail) -> str:
         email = parsed.sender_email
@@ -2065,14 +2083,11 @@ class TelegramMailPlugin(Star):
         label = display_name or email or parsed.sender or "(Unknown sender)"
         if not email:
             return self._markdown_escape(label)
-        return (
-            f"[{self._markdown_escape(label)}]"
-            f"(mailto:{self._markdown_link_escape(email)})"
-        )
+        return f"[{self._markdown_escape(label)}](mailto:{markdown_link_escape(email)})"
 
     @staticmethod
     def _markdown_link_escape(value: str) -> str:
-        return str(value or "").replace("\\", "\\\\").replace(")", r"\)")
+        return markdown_link_escape(value)
 
     def _attachment_button_text(self, filename: str) -> str:
         return f"📎 {self._truncate(filename or 'attachment', 28)}"
