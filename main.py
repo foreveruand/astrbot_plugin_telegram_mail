@@ -56,6 +56,8 @@ DEFAULT_NETWORK_TIMEOUT = 15
 DEFAULT_MAX_WORKERS = 4
 DEFAULT_HISTORICAL_MAIL_GRACE_SECONDS = 86400
 DEFAULT_DISABLE_IDLE_ON_ERROR = False
+DEFAULT_IMAP_FOLDER_REFRESH_INTERVAL = 3600
+DEFAULT_OAUTH2_BACKOFF_MAX = 3600
 IDLE_WAIT_SLICE = 60
 IMAP_FOLDER_MODE_AUTO = "auto"
 IMAP_FOLDER_MODE_CONFIGURED = "configured"
@@ -68,14 +70,10 @@ EXCLUDED_AUTO_FOLDER_NAMES = {
     "deleted messages",
     "draft",
     "drafts",
-    "junk",
-    "junk e-mail",
-    "junk email",
     "outbox",
     "sent",
     "sent items",
     "sent mail",
-    "spam",
     "sync issues",
     "trash",
 }
@@ -205,7 +203,6 @@ def _build_provider_account_config(
         )
     else:
         base["auth_type"] = "oauth2"
-        base["imap_folder_mode"] = IMAP_FOLDER_MODE_AUTO
         if oauth2_client_id.strip():
             base["oauth2_client_id"] = oauth2_client_id.strip()
         if oauth2_client_secret.strip():
@@ -270,7 +267,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.17",
+    "0.1.18",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -293,8 +290,10 @@ class TelegramMailPlugin(Star):
         self._thread_stop_event = threading.Event()
         self.folder_modes: dict[tuple[str, str], str] = {}
         self.resolved_folders: dict[str, list[str]] = {}
+        self.folder_resolution_times: dict[str, float] = {}
         self.idle_disabled_accounts: set[str] = set()
         self._account_mail_locks: dict[str, asyncio.Lock] = {}
+        self._oauth2_backoff: dict[str, tuple[float, int]] = {}
 
     async def initialize(self) -> None:
         _patch_telegram_callback_edit_message_preview()
@@ -468,20 +467,28 @@ class TelegramMailPlugin(Star):
 
     async def _watch_oauth2_account_loop(self, account: MailAccount) -> None:
         while not self._stop_event.is_set():
+            backoff = self._oauth2_backoff_remaining(account)
+            if backoff > 0:
+                await self._sleep_until_wakeup(backoff)
+                continue
             try:
                 self._set_account_mode(account, "oauth2 polling")
                 await self._poll_account(account, push=True)
                 self.store.clear_last_error(account.owner_id, account.account_id)
+                self._reset_oauth2_backoff(account)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                self._log_mail_error(
-                    exc,
-                    "Mail OAuth2 poll failed for owner %s account %s user %s",
-                    account.owner_id,
-                    account.account_id,
-                    account.imap_user,
-                )
+                if isinstance(exc, MailConnectionError):
+                    self._record_oauth2_poll_failure(account, exc)
+                else:
+                    self._log_mail_error(
+                        exc,
+                        "Mail OAuth2 poll failed for owner %s account %s user %s",
+                        account.owner_id,
+                        account.account_id,
+                        account.imap_user,
+                    )
                 self.store.set_last_error(
                     account.owner_id, account.account_id, str(exc)
                 )
@@ -619,10 +626,13 @@ class TelegramMailPlugin(Star):
                 await self._sleep_poll_interval(account)
 
     async def _sleep_poll_interval(self, account: MailAccount) -> None:
+        await self._sleep_until_wakeup(max(account.poll_interval, 30))
+
+    async def _sleep_until_wakeup(self, timeout: float) -> None:
         try:
             await asyncio.wait_for(
                 self._stop_event.wait(),
-                timeout=max(account.poll_interval, 30),
+                timeout=max(timeout, 0.1),
             )
         except asyncio.TimeoutError:
             pass
@@ -686,14 +696,6 @@ class TelegramMailPlugin(Star):
                 raise
             except Exception as exc:
                 errors.append((folder, exc))
-                self._log_mail_error(
-                    exc,
-                    "Mail folder poll failed for owner %s account %s user %s folder %s",
-                    account.owner_id,
-                    account.account_id,
-                    account.imap_user,
-                    folder,
-                )
                 self.store.set_last_error(
                     account.owner_id,
                     account.account_id,
@@ -702,6 +704,8 @@ class TelegramMailPlugin(Star):
                 self.store.save()
         if errors:
             folder, exc = errors[0]
+            if isinstance(exc, MailConnectionError):
+                raise MailConnectionError(f"{folder}: {exc}") from exc
             raise RuntimeError(f"{folder}: {exc}") from exc
         return total
 
@@ -1969,6 +1973,19 @@ class TelegramMailPlugin(Star):
             folders = account.imap_folders
             resolved_folders[key] = folders
             return folders
+        refresh_interval = max(
+            self._config_int(
+                "imap_folder_refresh_interval",
+                DEFAULT_IMAP_FOLDER_REFRESH_INTERVAL,
+            ),
+            60,
+        )
+        resolved_at = self._folder_resolution_times().get(key, 0.0)
+        if (
+            key in resolved_folders
+            and time.monotonic() - resolved_at < refresh_interval
+        ):
+            return resolved_folders[key]
         try:
             listed = await self._run_mail_io(self.mail_client.list_folders, account)
         except Exception as exc:
@@ -1983,6 +2000,7 @@ class TelegramMailPlugin(Star):
         if not folders:
             folders = account.imap_folders
         resolved_folders[key] = folders
+        self._folder_resolution_times()[key] = time.monotonic()
         return folders
 
     def _cached_account_folders(self, account: MailAccount) -> list[str]:
@@ -1994,6 +2012,11 @@ class TelegramMailPlugin(Star):
         if not hasattr(self, "resolved_folders"):
             self.resolved_folders = {}
         return self.resolved_folders
+
+    def _folder_resolution_times(self) -> dict[str, float]:
+        if not hasattr(self, "folder_resolution_times"):
+            self.folder_resolution_times = {}
+        return self.folder_resolution_times
 
     def _account_folder_summary(self, account: MailAccount) -> str:
         folders = self._cached_account_folders(account)
@@ -2103,6 +2126,72 @@ class TelegramMailPlugin(Star):
 
     def _serializes_account_mail_io(self, account: MailAccount) -> bool:
         return account.imap_auth_type == "oauth2"
+
+    def _oauth2_backoff_remaining(self, account: MailAccount) -> float:
+        """Return the remaining retry delay for an OAuth2 account.
+
+        Args:
+            account: Mail account whose retry state is inspected.
+
+        Returns:
+            Seconds until the next permitted poll attempt.
+        """
+        state = self._oauth2_backoff_state().get(self._account_state_key(account))
+        if not state:
+            return 0
+        retry_at, _ = state
+        return max(retry_at - time.monotonic(), 0)
+
+    def _reset_oauth2_backoff(self, account: MailAccount) -> None:
+        """Clear retry state after an OAuth2 account polls successfully.
+
+        Args:
+            account: Mail account whose retry state is cleared.
+        """
+        self._oauth2_backoff_state().pop(self._account_state_key(account), None)
+
+    def _record_oauth2_poll_failure(self, account: MailAccount, exc: Exception) -> None:
+        """Record a recoverable OAuth2 poll failure and schedule its next retry.
+
+        Args:
+            account: Mail account that failed to poll.
+            exc: Recoverable connection error returned by the mail client.
+        """
+        key = self._account_state_key(account)
+        _, failures = self._oauth2_backoff_state().get(key, (0, 0))
+        failures += 1
+        delay = min(
+            max(account.poll_interval, 30) * (2 ** (failures - 1)),
+            DEFAULT_OAUTH2_BACKOFF_MAX,
+        )
+        self._oauth2_backoff_state()[key] = (time.monotonic() + delay, failures)
+        if failures == 1:
+            logger.warning(
+                "Mail OAuth2 poll temporarily unavailable for account %s user %s; "
+                "retrying in %ss: %s",
+                account.account_id,
+                account.imap_user,
+                delay,
+                exc,
+            )
+        else:
+            logger.debug(
+                "Mail OAuth2 poll still unavailable for account %s; "
+                "retrying in %ss: %s",
+                account.account_id,
+                delay,
+                exc,
+            )
+
+    def _oauth2_backoff_state(self) -> dict[str, tuple[float, int]]:
+        """Return the lazily initialized OAuth2 retry state.
+
+        Returns:
+            Account retry timestamps and consecutive failure counts.
+        """
+        if not hasattr(self, "_oauth2_backoff"):
+            self._oauth2_backoff = {}
+        return self._oauth2_backoff
 
     def _uses_oauth2_realtime_polling(self, account: MailAccount) -> bool:
         return account.imap_auth_type == "oauth2"

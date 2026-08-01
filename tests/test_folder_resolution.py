@@ -23,7 +23,7 @@ def _account(plugin, **overrides):
     return plugin._parse_account(config, "u1")
 
 
-def test_auto_folder_filter_keeps_custom_inbox_folders():
+def test_auto_folder_filter_keeps_custom_and_junk_folders():
     folders = TelegramMailPlugin._filter_auto_folders(
         [
             "INBOX",
@@ -37,7 +37,7 @@ def test_auto_folder_filter_keeps_custom_inbox_folders():
         ]
     )
 
-    assert folders == ["INBOX", "验证码", "Projects/Inbox"]
+    assert folders == ["INBOX", "验证码", "Junk", "Projects/Inbox"]
 
 
 def test_auto_folder_resolution_uses_listed_receive_folders():
@@ -50,7 +50,7 @@ def test_auto_folder_resolution_uses_listed_receive_folders():
 
     folders = asyncio.run(plugin._resolve_account_folders(account))
 
-    assert folders == ["INBOX", "验证码"]
+    assert folders == ["INBOX", "验证码", "Junk Email"]
 
 
 def test_auto_folder_resolution_falls_back_to_configured_folders():
@@ -64,3 +64,27 @@ def test_auto_folder_resolution_falls_back_to_configured_folders():
     folders = asyncio.run(plugin._resolve_account_folders(account))
 
     assert folders == ["INBOX", "验证码"]
+
+
+def test_auto_folder_resolution_uses_cached_result():
+    class MailClient:
+        def __init__(self):
+            self.calls = 0
+
+        def list_folders(self, account):
+            self.calls += 1
+            return ["INBOX", "Junk Email"]
+
+    mail_client = MailClient()
+    plugin = _plugin(mail_client)
+    account = _account(plugin)
+
+    assert asyncio.run(plugin._resolve_account_folders(account)) == [
+        "INBOX",
+        "Junk Email",
+    ]
+    assert asyncio.run(plugin._resolve_account_folders(account)) == [
+        "INBOX",
+        "Junk Email",
+    ]
+    assert mail_client.calls == 1

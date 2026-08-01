@@ -1,5 +1,6 @@
 import asyncio
 
+from astrbot_plugin_telegram_mail.mail_client import MailConnectionError
 from astrbot_plugin_telegram_mail.main import TelegramMailPlugin
 from astrbot_plugin_telegram_mail.storage import JsonStore
 
@@ -140,3 +141,20 @@ def test_check_now_continues_when_one_account_fails(tmp_path):
     assert not plugin.store.last_error("u1", "good")
     assert plugin.store.is_initialized("u1", "good", "INBOX")
     assert plugin.store.is_initialized("u1", "good", "Alerts")
+
+
+def test_oauth2_backoff_grows_and_resets_after_success(tmp_path, monkeypatch):
+    plugin = _plugin(tmp_path)
+    account = _oauth2_account(plugin, poll_interval=60)
+    now = [100.0]
+    monkeypatch.setattr("astrbot_plugin_telegram_mail.main.time.monotonic", lambda: now[0])
+
+    plugin._record_oauth2_poll_failure(account, MailConnectionError("temporary"))
+    assert plugin._oauth2_backoff_remaining(account) == 60
+
+    now[0] = 160.0
+    plugin._record_oauth2_poll_failure(account, MailConnectionError("temporary"))
+    assert plugin._oauth2_backoff_remaining(account) == 120
+
+    plugin._reset_oauth2_backoff(account)
+    assert plugin._oauth2_backoff_remaining(account) == 0

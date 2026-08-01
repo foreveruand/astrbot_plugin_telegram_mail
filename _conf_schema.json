@@ -39,7 +39,13 @@
         "description": "默认 IMAP 文件夹抓取模式",
         "type": "string",
         "default": "",
-        "hint": "可选 configured/auto。留空时 Outlook/Microsoft 账号默认 auto，其它账号默认 configured；账号配置可覆盖该值。auto 会从 IMAP LIST 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Junk、Spam、Archive、All Mail 等非收件或易重复文件夹。"
+        "hint": "可选 configured/auto。留空时 Outlook/Microsoft 账号默认 auto，其它账号默认 configured；账号配置可覆盖该值。auto 会从 IMAP LIST 自动发现可收件文件夹，保留 Junk/Spam 垃圾邮件文件夹以防误判邮件遗漏，并排除 Sent、Drafts、Trash、Archive、All Mail 等非收件或易重复文件夹。"
+    },
+    "imap_folder_refresh_interval": {
+        "description": "自动发现文件夹刷新间隔(秒)",
+        "type": "int",
+        "default": 3600,
+        "hint": "仅 imap_folder_mode=auto 生效。自动发现的文件夹会在此时间内复用，避免每次轮询都额外建立 IMAP LIST 会话；最小 60 秒。"
     },
     "notify_existing_on_first_run": {
         "description": "首次运行推送历史邮件",

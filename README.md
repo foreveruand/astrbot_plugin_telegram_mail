@@ -16,11 +16,11 @@
 - SMTP 支持 `/mail send` 新建邮件和 `/mail reply` 回复邮件。
 - 邮件正文展示前会先过滤常见的 HTML/CSS 噪音和重复头部片段，避免正文开头被一大段无效内容淹没。
 - 仅含 HTML 的邮件会将正文中的超链接渲染为 Telegram MarkdownV2 内联链接 `[文字](链接)`，避免把原始 URL 直接拼进消息造成刷屏，链接在 Telegram 中点击即可跳转。
-- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。Outlook/Microsoft 账号默认使用 `imap_folder_mode: "auto"` 自动发现可收件文件夹，可覆盖被规则移动到“验证码”等自定义文件夹的邮件。
+- Outlook 账号可通过 OAuth2 登录，支持 `provider: "outlook"` 或 `auth_type: "oauth2"`；Microsoft 的 `oauth2_client_id` 可以写在插件设置里作为默认值，添加账号时也可以选择手动覆盖；保存账号后可用 `/mail oauth <account_id>` 让 bot 输出授权链接，用户打开浏览器授权后插件会自动保存并刷新 token。Outlook/Microsoft 账号未覆盖插件设置时默认使用 `imap_folder_mode: "auto"` 自动发现邮件文件夹。
 
 ## 配置
 
-邮箱账号不要写入插件设置。请由需要使用邮箱的用户私聊 bot 执行 `/mail add`，然后按提示依次选择邮箱类型、输入账号和必要参数；插件会按用户 ID 保存账号凭据、OAuth token、邮件按钮上下文和屏蔽列表。用户 ID 取 AstrBot `unified_msg_origin` 的最后一段；不同平台和 bot 实例不会再共享同一份邮箱状态。
+邮箱账号不要写入插件设置。请由需要使用邮箱的用户私聊 bot 执行 `/mail add`，然后按提示依次选择邮箱类型、输入账号和必要参数；插件会按用户 ID 保存账号凭据、OAuth token、邮件按钮上下文和屏蔽列表。
 
 插件设置中可以提供 Microsoft OAuth 默认值：
 
@@ -90,7 +90,6 @@ Outlook 示例：
   "message_type": "friend",
   "imap_user": "your@outlook.com",
   "imap_folders": ["INBOX"],
-  "imap_folder_mode": "auto",
   "smtp_user": "your@outlook.com",
   "oauth2_client_id": "your-app-client-id"
 }
@@ -98,18 +97,40 @@ Outlook 示例：
 
 `provider: "outlook"` 会默认使用 Microsoft 文档中的 IMAP/SMTP 设置：IMAP `outlook.office365.com:993` SSL/TLS，SMTP `smtp-mail.outlook.com:587` STARTTLS，并默认启用 OAuth2。保存账号后执行 `/mail oauth outlook-main`，插件会返回 Microsoft 授权链接和一次性代码；用户授权完成后，access token / refresh token 会保存在插件数据目录下的 SQLite 状态库中，后续 access token 过期会用 refresh token 自动刷新。
 
-`imap_folder_mode` 有两个值：
+### 默认 IMAP 文件夹抓取模式
 
-- `configured`：只抓取 `imap_folders` 中配置的文件夹。Gmail、QQ 等非 Outlook 账号默认使用该模式，保持旧行为。
-- `auto`：通过 IMAP `LIST` 自动发现可收件文件夹，并排除 Sent、Drafts、Trash、Deleted Items、Junk、Spam、Archive、Outbox、Sync Issues、Gmail All Mail 等非收件或容易重复的文件夹。自动发现失败时会回退到 `imap_folders`，避免账号不可用。
+插件设置可控制所有未在账号 JSON 中指定 `imap_folder_mode` 的账号。账号 JSON 中的同名字段优先级更高。
 
-Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。当前插件使用 device code public client flow，token 请求不会发送 `oauth2_client_secret`；如果 Microsoft 返回 `AADSTS90023: Public clients can't send a client secret`，说明运行中的版本仍在发送 secret，需要更新插件并重新执行 `/mail oauth <account_id>`。插件会按 Python 标准库要求分别处理 IMAP/SMTP 的 XOAUTH2 回调载荷，避免 Outlook 已授权但 IMAP 仍提示无法连接。OAuth2 access token 缓存和刷新锁会按用户、账号 ID、邮箱地址隔离，避免不同用户使用相同 `account_id` 时串用 token；完成 `/mail oauth <account_id>` 授权后也会清除旧 access-token 缓存。OAuth2 access token 过期时，同一账号的刷新请求会按账号加锁串行执行，避免并发线程重复使用 Microsoft 单次 refresh token。
+`configured` 只抓取 `imap_folders` 中的文件夹，适合只接收收件箱：
 
-Outlook/OAuth2 账号即使开启 `realtime_enabled`，也不会为每个文件夹创建 IMAP IDLE watcher，而是按账号执行一次轮询，串行扫描解析后的所有文件夹，然后按 `poll_interval` 休眠；`/mail status` 中会显示 `mode=oauth2 polling`。这个模式牺牲 IMAP IDLE 的即时性，换取多文件夹和多个 Outlook 账号下更稳定的 OAuth2 IMAP 连接。若 Outlook IMAP 返回 `User is authenticated but not connected`，通常表示 OAuth2 已通过但 Outlook/邮箱账号尚未开启 IMAP 访问，或 IMAP 设置刚开启尚未生效；请先在 Outlook 网页版或邮箱账号设置中开启 POP/IMAP 的 IMAP 访问，等待数分钟后重试。若 Outlook IMAP 偶发返回 `AUTHENTICATE failed`，插件会清除该账号的 access token 缓存并自动重试一次；如果重试后仍失败，后台日志会输出可读 warning。若错误显示 `invalid_grant`、`AADSTS700082` 或其它明确的 AADSTS token 过期/撤销信息，通常表示 refresh token 已过期、被用户或管理员撤销、账号密码/安全策略变化，或应用权限/范围发生变化，此时需要重新执行 `/mail oauth <account_id>`。Microsoft Graph message delta 是后续更稳定的多文件夹增量同步方向，但当前版本仍继续使用 IMAP/SMTP OAuth2，不新增 Graph 依赖或权限。
+```json
+{
+  "imap_folder_mode": "configured"
+}
+```
 
-插件仍会读取旧版本插件设置中的 `accounts_json` 以便兼容迁移，但不建议继续使用。旧配置属于全局账号，不能做到用户隔离。首次启动时，旧 `accounts` / `accounts_json` 会自动导入到 SQLite 状态库中，数据库里已有的同名账号会保留原值。
+### 📬 Auto 模式：包含垃圾邮件
 
-插件旧版 `state.json` 也会自动迁移到 SQLite；迁移后文件里会保留一个兼容标记，方便回滚或人工核查，但运行时状态以 `mail_state.db` 为准。
+`auto` 通过 IMAP `LIST` 自动发现可收件文件夹，适合有规则自动分类或需要接收垃圾邮件误判的场景。它保留 `Junk`、`Junk Email`、`Spam` 等垃圾邮件文件夹，并排除 Sent、Drafts、Trash、Archive、All Mail、Outbox、Sync Issues 等非收件或易重复文件夹。成功发现的结果默认缓存 3600 秒，避免每次轮询额外建立 `LIST` 会话。
+
+```json
+{
+  "imap_folder_mode": "auto",
+  "imap_folder_refresh_interval": 3600
+}
+```
+
+自动发现失败时会回退到账号的 `imap_folders`。例如只希望回退到收件箱：
+
+```json
+{
+  "imap_folders": ["INBOX"]
+}
+```
+
+Microsoft access token 通常是短期有效，refresh token 因为请求了 `offline_access` 才会返回。Microsoft 在刷新时可能返回新的 refresh token；插件会用新 refresh token 覆盖旧值，如果刷新响应只包含新的 access token，则保留当前已保存的 refresh token。OAuth2 access token 缓存和刷新锁会按用户、账号 ID、邮箱地址隔离，避免不同用户使用相同 `account_id` 时串用 token；完成 `/mail oauth <account_id>` 授权后也会清除旧 access-token 缓存。
+
+Outlook/OAuth2 账号即使开启 `realtime_enabled`，也不会为每个文件夹创建 IMAP IDLE watcher，而是按账号执行一次轮询，串行扫描解析后的所有文件夹，然后按 `poll_interval` 休眠；`/mail status` 中会显示 `mode=oauth2 polling`。这个模式牺牲 IMAP IDLE 的即时性，换取多文件夹和多个 Outlook 账号下更稳定的 OAuth2 IMAP 连接。若 Outlook IMAP 返回 `User is authenticated but not connected`，先在 Outlook 网页版的 **Settings > Mail > Forwarding and IMAP** 开启 IMAP 并保存；若账号已配置在多个 IMAP 客户端，还应在 Microsoft [Recent activity](https://account.live.com/activity) 中确认对应会话为本人操作。插件会在首次失败后进行指数退避，避免持续建立会话和刷屏日志；成功连接后会自动恢复正常轮询。仅当 token 刷新报 `invalid_grant`、`AADSTS700082` 或其它明确的 AADSTS token 过期/撤销信息时，才需要重新执行 `/mail oauth <account_id>`。
 
 群聊可将 `target_chat_id` 设置为 Telegram 负数群 ID，并将 `message_type` 设置为 `group`。话题群可使用 `chat_id#thread_id`。
 

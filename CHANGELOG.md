@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.18
+
+- Added bounded exponential backoff for repeated Outlook OAuth2 IMAP poll failures. The first recoverable outage is logged as a warning; repeated failures are suppressed to debug logging until a successful poll resets the state.
+- Preserved known mail connection errors across folder polling so background Outlook OAuth2 failures no longer produce duplicate logs or traceback chains.
+- Cached successful auto-folder discovery for one hour by default, reducing Outlook IMAP `LIST` session pressure. Added the `imap_folder_refresh_interval` setting.
+- Auto folder discovery now includes Junk/Spam folders so potentially misclassified mail is delivered. Sent, Draft, Trash, Archive, and All Mail folders remain excluded.
+- Updated configuration examples and removed obsolete global account configuration guidance.
+
 ## 0.1.17
 
 - Rendered HTML mail hyperlinks as Telegram MarkdownV2 inline links `[text](url)`. HTML-only emails no longer dump raw, non-clickable URLs into the pushed/full-text view; the anchor text is shown and Telegram opens the original URL through the inline link.

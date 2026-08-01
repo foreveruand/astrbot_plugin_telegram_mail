@@ -97,6 +97,20 @@ def test_global_folder_mode_can_override_regular_account_default():
     assert account.imap_folder_mode == IMAP_FOLDER_MODE_AUTO
 
 
+def test_global_folder_mode_overrides_new_outlook_account_default():
+    account = _plugin({"imap_folder_mode": "configured"})._parse_account(
+        _account_config(
+            provider="outlook",
+            imap_host="",
+            imap_password="",
+            oauth2_client_id="client-id",
+        ),
+        "u1",
+    )
+
+    assert account.imap_folder_mode == IMAP_FOLDER_MODE_CONFIGURED
+
+
 def test_outlook_provider_uses_plugin_oauth_defaults():
     account = _plugin(
         {
