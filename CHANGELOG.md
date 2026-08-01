@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.19
+
+- Fixed QQ Mail IMAP folders with spaces, such as `Sent Messages`, being sent without IMAP quoting and rejected with `BAD Select parameters!`.
+
 ## 0.1.18
 
 - Added bounded exponential backoff for repeated Outlook OAuth2 IMAP poll failures. The first recoverable outage is logged as a warning; repeated failures are suppressed to debug logging until a successful poll resets the state.

@@ -8,6 +8,7 @@
 - IMAP IDLE 或定时轮询检查新邮件并推送到指定 Telegram `chat_id`。
 - 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询；Outlook/OAuth2 账号实时模式固定使用账号级轮询，避免多个文件夹同时维持 IMAP IDLE 会话。
 - IMAP、SMTP、OAuth 的常见网络或认证异常会转换为可读错误；后台可恢复错误只记录 warning，并可在 `/mail status` 中查看最近错误。
+- IMAP 文件夹名称会按协议正确转义，QQ 邮箱等服务的 `Sent Messages` 等带空格文件夹可正常检查和操作。
 - 邮件卡片使用 Telegram Markdown 展示主题、发件人、时间和正文预览，并会转义邮件动态内容，避免格式被邮件正文破坏。
 - 附件直接显示在主邮件卡片按钮上，点击后按需发送对应附件；旧的 `Attachments` 回调入口仍保留兼容。
 - `More` 按钮展示全文并支持 Prev/Next 翻页。

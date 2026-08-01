@@ -101,7 +101,9 @@ class MailClient:
             self._select_folder(client, folder)
             self._ensure_folder(client, target_folder)
             self._select_folder(client, folder)
-            status, _ = client.uid("COPY", uid, target_folder)
+            status, _ = client.uid(
+                "COPY", uid, self._imap_folder_argument(target_folder)
+            )
             if status != "OK":
                 raise RuntimeError(f"Failed to copy UID {uid} to {target_folder}")
             self._delete_selected_uid(client, uid)
@@ -265,9 +267,13 @@ class MailClient:
         raise MailConnectionError(f"账号 {account.account_id} 的 IMAP 连接失败。")
 
     def _select_folder(self, client: imaplib.IMAP4, folder: str) -> None:
-        status, _ = client.select(folder)
+        status, _ = client.select(self._imap_folder_argument(folder))
         if status != "OK":
             raise MailConnectionError(f"无法选择 IMAP 文件夹 {folder}。")
+
+    @staticmethod
+    def _imap_folder_argument(folder: str) -> str:
+        return '"' + folder.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     @staticmethod
     def _parse_list_folder_name(line: str) -> str:
@@ -287,10 +293,11 @@ class MailClient:
 
     @staticmethod
     def _ensure_folder(client: imaplib.IMAP4, folder: str) -> None:
-        status, _ = client.status(folder, "(MESSAGES)")
+        folder_arg = MailClient._imap_folder_argument(folder)
+        status, _ = client.status(folder_arg, "(MESSAGES)")
         if status == "OK":
             return
-        create_status, _ = client.create(folder)
+        create_status, _ = client.create(folder_arg)
         if create_status != "OK":
             raise RuntimeError(f"Failed to create IMAP folder: {folder}")
 

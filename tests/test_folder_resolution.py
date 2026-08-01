@@ -1,5 +1,6 @@
 import asyncio
 
+from astrbot_plugin_telegram_mail.mail_client import MailClient
 from astrbot_plugin_telegram_mail.main import TelegramMailPlugin
 
 
@@ -88,3 +89,19 @@ def test_auto_folder_resolution_uses_cached_result():
         "Junk Email",
     ]
     assert mail_client.calls == 1
+
+
+def test_select_folder_quotes_mailbox_names_with_spaces():
+    class ImapClient:
+        def __init__(self):
+            self.mailbox = ""
+
+        def select(self, mailbox):
+            self.mailbox = mailbox
+            return "OK", []
+
+    client = ImapClient()
+
+    MailClient()._select_folder(client, "Sent Messages")
+
+    assert client.mailbox == '"Sent Messages"'
