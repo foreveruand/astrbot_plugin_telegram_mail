@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.20
+
+- Fixed duplicate mail pushes when the same message is visible in multiple IMAP folders or is picked up by overlapping polling paths.
+- Removed duplicate folder entries from account configurations before starting mail watchers.
+
 ## 0.1.19
 
 - Fixed QQ Mail IMAP folders with spaces, such as `Sent Messages`, being sent without IMAP quoting and rejected with `BAD Select parameters!`.

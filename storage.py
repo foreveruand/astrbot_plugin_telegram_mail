@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_OWNER_ID = "default"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 STATE_MIGRATION_MARKER = "_telegram_mail_db_migration"
 STATE_MIGRATION_META_KEY = "state_json_migration"
 
@@ -99,6 +99,18 @@ class JsonStore:
                 (_owner_id(owner_id), str(account_id), str(folder), str(uid)),
             )
             self._db().commit()
+
+    def claim_delivery(self, owner_id: str, account_id: str, message_key: str) -> bool:
+        with self._lock:
+            cursor = self._db().execute(
+                """
+                INSERT OR IGNORE INTO delivered(owner_id, account_id, message_key)
+                VALUES (?, ?, ?)
+                """,
+                (_owner_id(owner_id), str(account_id), str(message_key)),
+            )
+            self._db().commit()
+            return cursor.rowcount > 0
 
     def is_initialized(self, owner_id: str, account_id: str, folder: str) -> bool:
         with self._lock:
@@ -454,7 +466,14 @@ class JsonStore:
                 """,
                 (owner_id, account_id),
             )
-            for table in ("seen", "initialized", "oauth2", "blocked", "account_state"):
+            for table in (
+                "seen",
+                "initialized",
+                "delivered",
+                "oauth2",
+                "blocked",
+                "account_state",
+            ):
                 conn.execute(
                     f"DELETE FROM {table} WHERE owner_id = ? AND account_id = ?",
                     (owner_id, account_id),
@@ -506,6 +525,12 @@ class JsonStore:
                 account_id TEXT NOT NULL,
                 folder TEXT NOT NULL,
                 PRIMARY KEY(owner_id, account_id, folder)
+            );
+            CREATE TABLE IF NOT EXISTS delivered (
+                owner_id TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                message_key TEXT NOT NULL,
+                PRIMARY KEY(owner_id, account_id, message_key)
             );
             CREATE TABLE IF NOT EXISTS tokens (
                 owner_id TEXT NOT NULL,

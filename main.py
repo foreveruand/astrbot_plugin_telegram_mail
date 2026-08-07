@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 import shlex
@@ -267,7 +268,7 @@ def _patch_telegram_callback_edit_message_preview() -> None:
     PLUGIN_NAME,
     "foreveruand",
     "Telegram-only IMAP/SMTP mail assistant with inline actions.",
-    "0.1.18",
+    "0.1.20",
 )
 class TelegramMailPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
@@ -773,6 +774,15 @@ class TelegramMailPlugin(Star):
             ):
                 continue
             if push:
+                message_key = parsed.message_id.strip().casefold()
+                if not message_key:
+                    message_key = hashlib.sha256(raw).hexdigest()
+                if not self.store.claim_delivery(
+                    account.owner_id,
+                    account.account_id,
+                    message_key,
+                ):
+                    continue
                 await self._push_mail_card(account, parsed, raw)
             total += 1
 
@@ -1790,6 +1800,14 @@ class TelegramMailPlugin(Star):
         imap_folders = item.get("imap_folders") or ["INBOX"]
         if isinstance(imap_folders, str):
             imap_folders = [imap_folders]
+        unique_folders = []
+        folder_keys = set()
+        for folder in imap_folders:
+            folder = str(folder)
+            folder_key = folder.casefold()
+            if folder_key and folder_key not in folder_keys:
+                unique_folders.append(folder)
+                folder_keys.add(folder_key)
         imap_folder_mode = self._account_folder_mode(item, is_outlook)
         oauth2_state = {}
         store = getattr(self, "store", None)
@@ -1811,7 +1829,7 @@ class TelegramMailPlugin(Star):
             imap_password=str(item.get("imap_password") or item.get("password") or ""),
             imap_auth_type=imap_auth_type,
             imap_tls=bool(item.get("imap_tls", True)),
-            imap_folders=[str(folder) for folder in imap_folders],
+            imap_folders=unique_folders,
             imap_folder_mode=imap_folder_mode,
             smtp_host=str(
                 item.get("smtp_host") or ("smtp-mail.outlook.com" if is_outlook else "")

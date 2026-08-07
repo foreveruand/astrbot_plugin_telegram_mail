@@ -15,6 +15,8 @@ def test_sqlite_state_round_trip(tmp_path):
     store.set_account_config("u1", "a1", {"imap_user": "u1@example.com"})
     store.set_seen("u1", "a1", "INBOX", {"2", "10"})
     store.add_seen("u1", "a1", "INBOX", "11")
+    assert store.claim_delivery("u1", "a1", "<message-1@example.com>")
+    assert not store.claim_delivery("u1", "a1", "<message-1@example.com>")
     store.set_initialized("u1", "a1", "INBOX")
     store.set_oauth2_state(
         "u1",

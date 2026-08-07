@@ -6,6 +6,7 @@
 
 - 多邮箱账号配置，按 Telegram 用户 ID 独立保存。
 - IMAP IDLE 或定时轮询检查新邮件并推送到指定 Telegram `chat_id`。
+- 使用持久化邮件身份去重；同一封邮件即使出现在多个 IMAP 文件夹或被并发轮询，也只推送一次。
 - 邮箱服务端不支持 IMAP IDLE 或连接异常时自动回退为定时轮询；Outlook/OAuth2 账号实时模式固定使用账号级轮询，避免多个文件夹同时维持 IMAP IDLE 会话。
 - IMAP、SMTP、OAuth 的常见网络或认证异常会转换为可读错误；后台可恢复错误只记录 warning，并可在 `/mail status` 中查看最近错误。
 - IMAP 文件夹名称会按协议正确转义，QQ 邮箱等服务的 `Sent Messages` 等带空格文件夹可正常检查和操作。
